@@ -1,0 +1,72 @@
+# macOS / Windows junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyc.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.nox/
+.tox/
+.hypothesis/
+.ipynb_checkpoints/
+.eggs/
+*.egg-info/
+build/
+dist/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+logs/
+
+# Training / experiment artifacts
+outputs/
+results/
+models/
+checkpoints/
+runs/
+mlruns/
+wandb/
+lightning_logs/
+tensorboard/
+tb_logs/
+debugs/
+tmp*/
+
+# Model binaries
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Large local data artifacts
+frames/
+**/frames/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.zip
+*.7z
+*.tar
+*.gz
+*.rar

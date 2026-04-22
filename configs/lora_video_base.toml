@@ -1,0 +1,62 @@
+# LoRA config for text-video retrieval with Qwen3-VL-Embedding-2B
+# Designed for a safe first run on ~24GB VRAM with bf16 + grad checkpointing.
+
+[model]
+model_name_or_path = "Qwen/Qwen3-VL-Embedding-2B"
+trust_remote_code = true
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file = ""
+eval_file = ""
+video_column = "video"
+text_column = "text"
+
+# Conservative video setup for anomaly retrieval
+fps = 1
+max_frames = 16
+
+[training]
+output_dir = "outputs/qwen3-vl-embedding-lora-retrieval"
+per_device_train_batch_size = 4
+per_device_eval_batch_size = 4
+gradient_accumulation_steps = 8
+effective_batch_size = 32
+
+num_train_epochs = 3
+learning_rate = 2.0e-5
+weight_decay = 0.01
+warmup_ratio = 0.05
+lr_scheduler_type = "cosine"
+
+logging_steps = 10
+save_steps = 500
+eval_steps = 500
+
+bf16 = true
+fp16 = false
+tf32 = true
+gradient_checkpointing = true
+dataloader_num_workers = 4
+remove_unused_columns = false
+report_to = "none"
+
+[lora]
+enabled = true
+r = 32
+lora_alpha = 32
+lora_dropout = 0.05
+bias = "none"
+task_type = "CAUSAL_LM"
+target_modules = [
+  "q_proj",
+  "k_proj",
+  "v_proj",
+  "gate_proj",
+  "up_proj",
+  "down_proj",
+]
+
+[run]
+seed = 42
+resume_from_checkpoint = ""
