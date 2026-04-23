@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from typing import Any, Dict, List, Optional, Union
 
 from PIL import Image
@@ -8,15 +7,13 @@ from PIL import Image
 
 class QwenEmbedderAdapter:
     """
-    Small adapter exposing stable public methods for local pipeline code.
+    Adapter-only module:
+    - format model input objects
+    - preprocess conversations into model tensors
     """
 
     def __init__(self, embedder: Any) -> None:
         self._embedder = embedder
-        self._warned_private_preprocess = False
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._embedder, name)
 
     def format_model_input(
         self,
@@ -47,13 +44,6 @@ class QwenEmbedderAdapter:
             return self._embedder.preprocess_inputs(conversations)
 
         if hasattr(self._embedder, "_preprocess_inputs"):
-            if not self._warned_private_preprocess:
-                warnings.warn(
-                    "Embedder has no public preprocess_inputs(...); "
-                    "falling back to _preprocess_inputs(...).",
-                    stacklevel=2,
-                )
-                self._warned_private_preprocess = True
             return self._embedder._preprocess_inputs(conversations)
 
         raise AttributeError(
