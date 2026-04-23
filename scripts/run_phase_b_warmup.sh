@@ -12,7 +12,6 @@ RUN_NAME="phase_b_warmup"
 GPU_IDS=""
 OUTPUT_DIR=""
 MAX_TRAIN_STEPS=""
-MONITOR_INTERVAL=20
 DRY_RUN=0
 
 USE_WANDB=0
@@ -22,6 +21,15 @@ HUB_MODEL_ID=""
 HUB_PRIVATE=0
 
 EXTRA_ARGS=()
+
+sanitize_filename() {
+  local value="$1"
+  value="${value// /_}"
+  value="${value//\//-}"
+  value="${value//:/-}"
+  value="${value//[^A-Za-z0-9._-]/_}"
+  printf '%s' "$value"
+}
 
 usage() {
   cat <<'EOF'
@@ -34,7 +42,7 @@ Options:
   --python BIN               Python executable (default: python3)
   --output-dir PATH          Override trainer output dir
   --run-name NAME            Name prefix for log files (default: phase_b_warmup)
-  --log-dir PATH             Directory to store nohup and memory logs
+  --log-dir PATH             Directory to store the training log
   --gpu IDS                  CUDA_VISIBLE_DEVICES value (e.g. 0 or 0,1)
   --max-train-steps N        Override max training steps
 
@@ -44,18 +52,14 @@ Options:
   --hub-model-id ID          Hugging Face repo id (username/repo)
   --hub-private              Add --hub-private to trainer
 
-  --monitor-interval SEC     Memory snapshot interval in seconds (default: 20)
   --dry-run                  Print command only, do not execute
   -h, --help                 Show this help
 
 Notes:
   - Any unknown args are forwarded to trainer script.
-  - Logs:
-      <log-dir>/<run-name>_<timestamp>.log
-      <log-dir>/<run-name>_<timestamp>_mem.log
-  - PID files:
-      <log-dir>/<run-name>_<timestamp>.pid
-      <log-dir>/<run-name>_<timestamp>_mem.pid
+  - Log file:
+      starts as <log-dir>/<run-name>.log
+      then trainer renames it to <log-dir>/<run-name>__<wandb-actual-name>.log
 EOF
 }
 
@@ -113,10 +117,6 @@ while [[ $# -gt 0 ]]; do
       HUB_PRIVATE=1
       shift
       ;;
-    --monitor-interval)
-      MONITOR_INTERVAL="$2"
-      shift 2
-      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -150,11 +150,8 @@ fi
 
 mkdir -p "$LOG_DIR"
 
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_FILE="${LOG_DIR}/${RUN_NAME}_${TIMESTAMP}.log"
-MEM_LOG_FILE="${LOG_DIR}/${RUN_NAME}_${TIMESTAMP}_mem.log"
-PID_FILE="${LOG_DIR}/${RUN_NAME}_${TIMESTAMP}.pid"
-MEM_PID_FILE="${LOG_DIR}/${RUN_NAME}_${TIMESTAMP}_mem.pid"
+LOG_BASENAME="$(sanitize_filename "$RUN_NAME")"
+LOG_FILE="${LOG_DIR}/${LOG_BASENAME}.log"
 
 CMD=("$PYTHON_BIN" "$TRAIN_SCRIPT" "--config" "$CONFIG_PATH")
 
@@ -194,7 +191,6 @@ fi
 cat <<EOF
 [launch] $LAUNCH_DESC
 [log]    $LOG_FILE
-[mem]    $MEM_LOG_FILE
 EOF
 
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -203,46 +199,25 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if [[ -n "$GPU_IDS" ]]; then
-  nohup env CUDA_VISIBLE_DEVICES="$GPU_IDS" "${CMD[@]}" >"$LOG_FILE" 2>&1 &
+  nohup env \
+    CUDA_VISIBLE_DEVICES="$GPU_IDS" \
+    VIDAR_LOG_PATH="$LOG_FILE" \
+    VIDAR_LOG_DIR="$LOG_DIR" \
+    VIDAR_LOG_BASENAME="$LOG_BASENAME" \
+    "${CMD[@]}" >"$LOG_FILE" 2>&1 &
 else
-  nohup "${CMD[@]}" >"$LOG_FILE" 2>&1 &
+  nohup env \
+    VIDAR_LOG_PATH="$LOG_FILE" \
+    VIDAR_LOG_DIR="$LOG_DIR" \
+    VIDAR_LOG_BASENAME="$LOG_BASENAME" \
+    "${CMD[@]}" >"$LOG_FILE" 2>&1 &
 fi
 TRAIN_PID=$!
 
-echo "$TRAIN_PID" > "$PID_FILE"
-
-(
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    while kill -0 "$TRAIN_PID" >/dev/null 2>&1; do
-      {
-        echo "===== $(date '+%F %T') ====="
-        nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,utilization.memory --format=csv,noheader,nounits
-      } >> "$MEM_LOG_FILE" 2>&1
-      sleep "$MONITOR_INTERVAL"
-    done
-  else
-    while kill -0 "$TRAIN_PID" >/dev/null 2>&1; do
-      {
-        echo "===== $(date '+%F %T') ====="
-        ps -o pid,ppid,%cpu,%mem,rss,vsz,etime,command -p "$TRAIN_PID"
-      } >> "$MEM_LOG_FILE" 2>&1
-      sleep "$MONITOR_INTERVAL"
-    done
-  fi
-) &
-MEM_PID=$!
-
-echo "$MEM_PID" > "$MEM_PID_FILE"
-
 cat <<EOF
 [started] train pid: $TRAIN_PID
-[started] monitor pid: $MEM_PID
-[pidfile] $PID_FILE
-[pidfile] $MEM_PID_FILE
 
 Useful commands:
-  tail -f "$LOG_FILE"
-  tail -f "$MEM_LOG_FILE"
+  tail -f "$(ls -1t "$LOG_DIR"/"${LOG_BASENAME}"*.log 2>/dev/null | head -n 1)"
   kill "$TRAIN_PID"            # stop training
-  kill "$MEM_PID"              # stop memory monitor only
 EOF

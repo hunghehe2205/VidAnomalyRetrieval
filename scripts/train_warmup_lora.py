@@ -418,7 +418,61 @@ def maybe_init_wandb(
         print("[warn] wandb is not installed. Continue without wandb logging.")
         return None
 
-    return wandb.init(project=project, name=run_name, config=config)
+    init_kwargs = {"project": project, "config": config}
+    if run_name.strip():
+        init_kwargs["name"] = run_name
+    return wandb.init(**init_kwargs)
+
+
+def sanitize_filename(value: str) -> str:
+    cleaned = []
+    for char in value.strip():
+        if char.isalnum() or char in "._-":
+            cleaned.append(char)
+        else:
+            cleaned.append("_")
+    return "".join(cleaned).strip("._") or "wandb-run"
+
+
+def resolve_unique_log_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    index = 2
+    while True:
+        candidate = path.with_name(f"{stem}-{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def maybe_rename_log_for_wandb(wandb_run: Any) -> Optional[Path]:
+    if wandb_run is None:
+        return None
+
+    import os
+
+    current_log = str(os.environ.get("VIDAR_LOG_PATH", "")).strip()
+    log_dir = str(os.environ.get("VIDAR_LOG_DIR", "")).strip()
+    log_basename = str(os.environ.get("VIDAR_LOG_BASENAME", "")).strip()
+    run_name = str(getattr(wandb_run, "name", "")).strip()
+
+    if not current_log or not log_dir or not log_basename or not run_name:
+        return None
+
+    current_path = Path(current_log)
+    if not current_path.exists():
+        return None
+
+    target_path = Path(log_dir) / f"{log_basename}__{sanitize_filename(run_name)}.log"
+    if target_path == current_path:
+        return target_path
+
+    target_path = resolve_unique_log_path(target_path)
+    current_path.rename(target_path)
+    os.environ["VIDAR_LOG_PATH"] = str(target_path)
+    return target_path
 
 
 def maybe_push_to_hub(
@@ -619,6 +673,9 @@ def main() -> None:
         project=wandb_project,
         run_name=wandb_run_name,
     )
+    renamed_log_path = maybe_rename_log_for_wandb(wandb_run)
+    if renamed_log_path is not None:
+        print(f"[log] renamed to {renamed_log_path}")
 
     print(f"Train samples: {len(train_dataset)}")
     if eval_dataset is not None:

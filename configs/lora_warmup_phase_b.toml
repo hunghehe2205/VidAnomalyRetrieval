@@ -55,7 +55,7 @@ dataloader_num_workers = 4
 
 report_to = "wandb"
 wandb_project = "Finetune-VAR-Qwen3VLembedding"
-wandb_run_name = "phase-b-warmup"
+wandb_run_name = ""
 
 [lora]
 enabled = true
