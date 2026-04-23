@@ -25,7 +25,15 @@ class QwenEmbeddingEngine:
 
     @property
     def device(self) -> torch.device:
-        return self.embedder.model.device
+        model = self.embedder.model
+        model_device = getattr(model, "device", None)
+        if model_device is not None:
+            return torch.device(model_device)
+
+        first_param = next(model.parameters(), None)
+        if first_param is None:
+            raise RuntimeError("Unable to infer model device because the model has no parameters.")
+        return first_param.device
 
     @classmethod
     def from_config(cls, config: Dict[str, Any], repo_root: Path) -> "QwenEmbeddingEngine":
