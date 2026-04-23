@@ -1,0 +1,59 @@
+[model]
+model_name_or_path = "Qwen/Qwen3-VL-Embedding-2B"
+trust_remote_code = true
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file = "data/T2V_VAR/ucf_crime_train.json"
+eval_file = "data/T2V_VAR/ucf_crime_test.json"
+query_column = "English Text"
+video_column = "Video Name"
+server_prefix = "/workspace/VidAnomalyRetrieval/UCF-Crime"
+fps = 1
+max_frames = 16
+fallback_to_dummy_video = false
+strict_video_check = true
+warn_on_dummy_fallback = true
+dummy_num_frames = 0
+
+[training]
+output_dir = "outputs/qwen3-vl-embedding-lora-retrieval"
+per_device_train_batch_size = 4
+per_device_eval_batch_size = 4
+gradient_accumulation_steps = 8
+effective_batch_size = 32
+learning_rate = 2.0e-5
+num_train_epochs = 3
+weight_decay = 0.01
+warmup_ratio = 0.05
+lr_scheduler_type = "cosine"
+logging_steps = 10
+save_steps = 500
+eval_steps = 500
+bf16 = true
+fp16 = false
+tf32 = true
+gradient_checkpointing = true
+dataloader_num_workers = 4
+remove_unused_columns = false
+report_to = "none"
+
+[lora]
+enabled = true
+r = 32
+alpha = 32
+lora_dropout = 0.05
+bias = "none"
+task_type = "CAUSAL_LM"
+target_modules = [
+  "q_proj",
+  "k_proj",
+  "v_proj",
+  "gate_proj",
+  "up_proj",
+  "down_proj",
+]
+
+[run]
+seed = 42
+resume_from_checkpoint = ""
