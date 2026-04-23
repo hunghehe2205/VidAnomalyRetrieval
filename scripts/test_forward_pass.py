@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, Dict
 
 import torch
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader
 
 from collator import QueryVideoCollator
@@ -26,10 +25,36 @@ def parse_args() -> argparse.Namespace:
         help="Path to phase-1 config TOML.",
     )
     parser.add_argument(
+        "--data-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional data file override for smoke test. "
+            "If omitted, use config[data].smoke_file (fallback to config[data].train_file)."
+        ),
+    )
+    parser.add_argument(
         "--server-prefix",
         type=str,
         default=None,
         help="Optional server prefix for relative video paths (overrides config[data].server_prefix).",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=4,
+        help="Number of dataset rows to smoke-test.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Batch size for smoke-test DataLoader.",
+    )
+    parser.add_argument(
+        "--all-batches",
+        action="store_true",
+        help="Iterate all batches in the selected subset (default: only first batch).",
     )
     return parser.parse_args()
 
@@ -60,7 +85,6 @@ def build_embedder(config: Dict[str, Any], repo_root: Path):
 
     init_kwargs: Dict[str, Any] = {
         "model_name_or_path": model_cfg["model_name_or_path"],
-        "trust_remote_code": model_cfg.get("trust_remote_code", True),
         "fps": data_cfg.get("fps", 1),
         "max_frames": data_cfg.get("max_frames", 16),
     }
@@ -71,21 +95,6 @@ def build_embedder(config: Dict[str, Any], repo_root: Path):
         init_kwargs["torch_dtype"] = torch.bfloat16
 
     return Qwen3VLEmbedder(**init_kwargs)
-
-
-def attach_lora(embedder: Any, config: Dict[str, Any]) -> None:
-    lora_cfg = config["lora"]
-    alpha = lora_cfg.get("alpha", lora_cfg.get("lora_alpha", 32))
-    peft_cfg = LoraConfig(
-        r=int(lora_cfg["r"]),
-        lora_alpha=int(alpha),
-        target_modules=list(lora_cfg["target_modules"]),
-        lora_dropout=float(lora_cfg.get("lora_dropout", 0.05)),
-        bias=str(lora_cfg.get("bias", "none")),
-        task_type=str(lora_cfg.get("task_type", "CAUSAL_LM")),
-    )
-    embedder.model = get_peft_model(embedder.model, peft_cfg)
-    embedder.model.eval()
 
 
 def move_tensor_dict_to_device(inputs: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -108,63 +117,89 @@ def pool_last_hidden(hidden_state: torch.Tensor, attention_mask: torch.Tensor) -
 
 def main() -> None:
     args = parse_args()
+    if args.num_samples <= 0:
+        raise ValueError("--num-samples must be > 0")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be > 0")
+
     repo_root = Path(__file__).resolve().parent.parent
     config = load_config(repo_root / args.config)
 
     raw_embedder = build_embedder(config, repo_root)
-    attach_lora(raw_embedder, config)
     embedder = QwenEmbedderAdapter(raw_embedder)
 
     data_cfg = config["data"]
-    train_path = repo_root / data_cfg["train_file"]
+    data_file_cfg = args.data_file or Path(
+        str(data_cfg.get("smoke_file", data_cfg["train_file"]))
+    )
+    data_path = (
+        data_file_cfg
+        if data_file_cfg.is_absolute()
+        else (repo_root / data_file_cfg)
+    )
     server_prefix = args.server_prefix
     if server_prefix is None:
         server_prefix = data_cfg.get("server_prefix", "")
 
     dataset = QueryVideoDataset(
-        data_path=str(train_path),
+        data_path=str(data_path),
         query_column=str(data_cfg.get("query_column", "query")),
         video_column=str(data_cfg.get("video_column", "video")),
         server_prefix=str(server_prefix),
+        max_samples=args.num_samples,
     )
     if len(dataset) == 0:
-        raise RuntimeError(f"Dataset is empty: {train_path}")
+        raise RuntimeError(f"Dataset is empty: {data_path}")
 
-    training_cfg = config["training"]
-    batch_size = int(training_cfg.get("per_device_train_batch_size", 4))
-
+    num_samples = len(dataset)
     collator = QueryVideoCollator(
         embedder=embedder,
+        fps=float(data_cfg.get("fps", 1)),
         max_frames=int(data_cfg.get("max_frames", 16)),
-        fallback_to_dummy_video=bool(data_cfg.get("fallback_to_dummy_video", True)),
-        strict_video_check=bool(data_cfg.get("strict_video_check", False)),
-        warn_on_dummy_fallback=bool(data_cfg.get("warn_on_dummy_fallback", True)),
-        dummy_num_frames=int(data_cfg.get("dummy_num_frames", 0)) or None,
     )
 
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collator)
-    batch = next(iter(loader))
+    loader = DataLoader(
+        dataset,
+        batch_size=min(args.batch_size, num_samples),
+        shuffle=False,
+        collate_fn=collator,
+    )
 
     device = embedder.model.device
-    query_inputs = move_tensor_dict_to_device(batch["query_inputs"], device)
-    video_inputs = move_tensor_dict_to_device(batch["video_inputs"], device)
+    print(f"Device: {device}")
+    print(f"Data file: {data_path}")
+    print(f"Running smoke test on {num_samples} samples.")
+    if args.all_batches:
+        batch_iter = enumerate(loader, start=1)
+    else:
+        first_batch = next(iter(loader), None)
+        if first_batch is None:
+            raise RuntimeError("No batch was produced by DataLoader.")
+        batch_iter = [(1, first_batch)]
 
-    with torch.no_grad():
-        query_outputs = embedder.forward(query_inputs)
-        video_outputs = embedder.forward(video_inputs)
+    for step, batch in batch_iter:
+        query_inputs = move_tensor_dict_to_device(batch["query_inputs"], device)
+        video_inputs = move_tensor_dict_to_device(batch["video_inputs"], device)
 
-    query_embeddings = pool_last_hidden(
-        query_outputs["last_hidden_state"], query_outputs["attention_mask"]
-    )
-    video_embeddings = pool_last_hidden(
-        video_outputs["last_hidden_state"], video_outputs["attention_mask"]
-    )
+        with torch.no_grad():
+            query_outputs = embedder.forward(query_inputs)
+            video_outputs = embedder.forward(video_inputs)
 
-    print("Forward-pass smoke test succeeded.")
-    print(f"Batch size: {query_embeddings.shape[0]}")
-    print(f"Embedding dim: {query_embeddings.shape[1]}")
-    print(f"Text embeddings shape: {tuple(query_embeddings.shape)}")
-    print(f"Video embeddings shape: {tuple(video_embeddings.shape)}")
+        query_embeddings = pool_last_hidden(
+            query_outputs["last_hidden_state"], query_outputs["attention_mask"]
+        )
+        video_embeddings = pool_last_hidden(
+            video_outputs["last_hidden_state"], video_outputs["attention_mask"]
+        )
+        score_matrix = query_embeddings @ video_embeddings.T
+
+        print(f"[Batch {step}]")
+        print(f"  query/text shape : {tuple(query_embeddings.shape)}")
+        print(f"  video shape      : {tuple(video_embeddings.shape)}")
+        print(f"  score matrix     : {tuple(score_matrix.shape)}")
+        print(f"  score diag       : {score_matrix.diag().detach().cpu().tolist()}")
+
+    print("Embedding smoke test succeeded.")
 
 
 if __name__ == "__main__":
