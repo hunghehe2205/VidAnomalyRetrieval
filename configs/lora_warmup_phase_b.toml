@@ -17,7 +17,7 @@ normal_negative_columns = ["normal_negatives"]
 normal_negative_delimiter = "|||"
 
 fps = 1
-max_frames = 16
+max_frames = 32
 
 # Optional dataset truncation for debug runs.
 # max_train_samples = 1024
@@ -53,8 +53,8 @@ tf32 = true
 gradient_checkpointing = true
 dataloader_num_workers = 4
 
-report_to = "none"
-wandb_project = "vid-anomaly-retrieval"
+report_to = "wandb"
+wandb_project = "Finetune-VAR-Qwen3VLembedding"
 wandb_run_name = "phase-b-warmup"
 
 [lora]
@@ -75,7 +75,7 @@ target_modules = [
 
 [hub]
 push_to_hub = false
-model_id = ""
+model_id = "hungnghehe/qwen3-vl-embedding-phase-b"
 private = true
 
 [run]
