@@ -235,7 +235,7 @@ def encode_and_store_features(
             {"video": entry["resolved_video_path"], "fps": fps, "max_frames": max_frames}
             for entry in batch_entries
         ]
-        embeddings = engine.encode_items(batch_items, normalize=True).detach().cpu().numpy()
+        embeddings = engine.encode_items(batch_items, normalize=True).detach().float().cpu().numpy()
         embeddings = embeddings.astype(save_dtype, copy=False)
 
         for entry, vector in zip(batch_entries, embeddings):

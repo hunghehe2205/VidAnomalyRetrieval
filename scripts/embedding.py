@@ -42,7 +42,7 @@ class QwenEmbeddingEngine:
         if torch.cuda.is_available():
             if "attn_implementation" in model_cfg:
                 init_kwargs["attn_implementation"] = model_cfg["attn_implementation"]
-            init_kwargs["torch_dtype"] = torch.bfloat16
+            init_kwargs["dtype"] = torch.bfloat16
 
         embedder = qwen_cls(**init_kwargs)
         return cls(embedder)
