@@ -1,0 +1,43 @@
+phase = "phase1"
+seed = 42
+
+[model]
+model_name_or_path = "Qwen/Qwen3-VL-Embedding-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file = "data/T2V_VAR/ucf_crime_train_dedup.json"
+eval_file = "data/T2V_VAR/ucf_crime_test.json"
+query_column = "English Text"
+video_column = "Video Name"
+server_prefix = "/workspace/VidAnomalyRetrieval/UCF-Crime"
+fps = 1
+max_frames = 16
+
+[training]
+output_dir = "outputs/phase1-warmup"
+per_device_train_batch_size = 16
+per_device_eval_batch_size = 16
+num_train_epochs = 4
+learning_rate = 1.0e-4
+weight_decay = 0.01
+warmup_ratio = 0.05
+temperature = 0.03
+max_grad_norm = 1.0
+logging_steps = 10
+save_steps = 100
+eval_steps = 50
+max_eval_batches = 50
+gradient_checkpointing = true
+dataloader_num_workers = 4
+bf16 = true
+wandb_project = "Finetune-VAR-Qwen3VLembedding"
+wandb_run_name = "phase1-bs16-lr1e4-temp03"
+
+[lora]
+r = 32
+lora_alpha = 32
+lora_dropout = 0.05
+bias = "none"
+task_type = "FEATURE_EXTRACTION"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
