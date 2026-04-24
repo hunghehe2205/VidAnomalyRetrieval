@@ -1,0 +1,1 @@
+"""model — QwenEmbeddingEngine + LoRA helpers."""

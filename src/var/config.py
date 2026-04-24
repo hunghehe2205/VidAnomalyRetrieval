@@ -1,0 +1,1 @@
+"""config — TOML → dataclass RunConfig."""
