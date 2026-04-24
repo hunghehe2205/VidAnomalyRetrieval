@@ -13,7 +13,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from var.config import load_config
 from var.data import ContrastiveCollator, QueryVideoDataset
 from var.iolog import log, new_log_filename, tee_to_file
-from var.model import QwenEmbeddingEngine, attach_lora, count_parameters
+from var.model import QwenEmbeddingEngine, attach_lora, count_parameters, load_adapter
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,7 +27,27 @@ def parse_args() -> argparse.Namespace:
 def _run(args: argparse.Namespace) -> None:
     cfg = load_config(REPO_ROOT / args.config)
     engine = QwenEmbeddingEngine.from_config(cfg, repo_root=REPO_ROOT)
-    engine.model = attach_lora(engine.model, cfg.lora)
+
+    if cfg.phase == "phase2" and cfg.phase2 is not None:
+        adapter_path = Path(cfg.phase2.resume_from)
+        if not adapter_path.is_absolute():
+            adapter_path = REPO_ROOT / adapter_path
+        if not adapter_path.exists():
+            raise FileNotFoundError(f"Phase 2 adapter not found: {adapter_path}")
+        engine.model = load_adapter(engine.model, adapter_path, is_trainable=True)
+        log("smoke", f"loaded adapter: {adapter_path}")
+    else:
+        engine.model = attach_lora(engine.model, cfg.lora)
+
+    # Mirror trainer.__init__: honor gradient_checkpointing so memory matches real train.
+    if cfg.training.gradient_checkpointing and hasattr(engine.model, "gradient_checkpointing_enable"):
+        engine.model.gradient_checkpointing_enable()
+        if hasattr(engine.model, "enable_input_require_grads"):
+            engine.model.enable_input_require_grads()
+        if hasattr(engine.model, "config"):
+            engine.model.config.use_cache = False
+        log("smoke", "gradient_checkpointing enabled")
+
     trainable, total = count_parameters(engine.model)
     log("smoke", f"trainable: {trainable:,} / {total:,}")
     log("smoke", f"device: {engine.device}")

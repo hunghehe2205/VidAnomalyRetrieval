@@ -34,7 +34,7 @@ gradient_checkpointing = true
 dataloader_num_workers = 2
 bf16 = true
 wandb_project = "Finetune-VAR-Qwen3VLembedding"
-wandb_run_name = "phase2-bs2-K8"
+wandb_run_name = "phase2-bs2-K4"
 
 [lora]
 r = 32
@@ -46,10 +46,10 @@ target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_pr
 
 [phase2]
 resume_from = "outputs/phase1-warmup-v2/checkpoint-200"
-num_hard_negatives = 8
-mine_skip_top = 10                        
-remine_every_epoch = true                 
-v2t_alpha = 0.3                           
+num_hard_negatives = 4
+mine_skip_top = 10
+remine_every_epoch = true
+v2t_alpha = 0.3
 
 [hub]
 push_to_hub = false
