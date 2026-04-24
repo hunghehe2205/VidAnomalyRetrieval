@@ -28,7 +28,7 @@ VidAnomalyRetrieval/
 ├── src/var/
 │   ├── __init__.py
 │   ├── config.py                     # TOML → dataclass RunConfig
-│   ├── data.py                       # Dataset, ClassBalancedSampler, Collator, category helper
+│   ├── data.py                       # Dataset, CategoryStratifiedSampler, Collator, category helper
 │   ├── model.py                      # QwenEmbeddingEngine, attach_lora, load_adapter
 │   ├── losses.py                     # symmetric_infonce, hard_neg_infonce
 │   ├── metrics.py                    # recall_at_k, median_rank, mean_ap, rank_positions
@@ -122,6 +122,7 @@ class Phase2Config:
     resume_from: str         # path to phase1 adapter
     num_hard_negatives: int  # K
     mine_skip_top: int       # skip top-N in ranking (avoid false negatives)
+    v2t_alpha: float = 0.3   # weight of v→t in-batch term in phase2_combined_loss
 
 @dataclass
 class RunConfig:
@@ -149,10 +150,15 @@ class QueryVideoDataset(Dataset):
     def __len__(self) -> int: ...
     def __getitem__(self, idx) -> dict: ...  # {"query", "video", "category"}
 
-class ClassBalancedSampler(Sampler):
-    """Each batch contains at most `max_per_category` samples from each category.
+class CategoryStratifiedSampler(Sampler):
+    """Stratifies batches by category to reduce semantic near-duplicates in contrastive
+    batches. NOT about class imbalance (there is no classification objective) — category
+    is a proxy for semantic similarity: samples within one category tend to share caption
+    content (e.g. multiple 'crossroad traffic' captions in Normal_Videos), which produces
+    false negatives in InfoNCE.
+
     With 14 categories and bs=16, max_per_category=2 guarantees at least 8 distinct
-    categories per batch, preventing `Normal_Videos` (50% of data) from dominating
+    categories per batch, preventing Normal_Videos (~50% of train) from dominating
     in-batch negatives. Yields index lists (one per batch)."""
     def __init__(self, dataset, batch_size, max_per_category=2, seed=42): ...
 
@@ -165,6 +171,25 @@ class ContrastiveCollator:
 ```
 
 `QueryVideoDataset.set_hard_negatives(mapping: dict[int, list[str]])` method allows phase2 to inject mined negatives without rebuilding the dataset.
+
+**Multi-positive eval helper.** The eval set (290 samples) still contains 2 duplicate
+query groups (only train was dedup'd). Without grouping, a duplicate would be counted
+as a false negative when the model retrieves "the other" correct video.
+
+```python
+def build_positive_groups(
+    dataset: QueryVideoDataset,
+    direction: Literal["t2v", "v2t"],
+) -> tuple[list[str], list[str], list[list[int]]]:
+    """Groups duplicates into multi-positive sets.
+
+    For direction="t2v": returns (unique_queries, unique_videos, pos_idx_per_query)
+    where pos_idx_per_query[i] is the list of video indices whose query text == query_i.
+    For direction="v2t": the symmetric version.
+
+    Used by evaluate.py so that R@K is counted as a hit if ANY positive appears
+    in the top-K."""
+```
 
 ### `src/var/model.py`
 
@@ -205,14 +230,29 @@ def symmetric_infonce(
 ) -> Tensor:
     """Bidirectional InfoNCE: 0.5 * (L_t2v + L_v2t)."""
 
-def hard_neg_infonce(
+def hard_neg_infonce_t2v(
     query_emb: Tensor,            # (B, D)
     positive_emb: Tensor,         # (B, D)
     hard_neg_emb: Tensor,         # (sum(K_i), D) flattened
     hard_neg_counts: list[int],   # K per query in batch
     temperature: float,
 ) -> Tensor:
-    """L_i = -log exp(s(q,p)/τ) / (exp(s(q,p)/τ) + sum_k exp(s(q,neg_k)/τ) + in-batch negs)"""
+    """Text→video with hard negatives. In-batch negatives (other queries' positives)
+    are included alongside mined hard negatives.
+    L_i = -log exp(s(q,p)/τ) / (exp(s(q,p)/τ) + sum_k exp(s(q,neg_k)/τ) + in-batch negs)"""
+
+def phase2_combined_loss(
+    query_emb: Tensor,
+    positive_emb: Tensor,
+    hard_neg_emb: Tensor,
+    hard_neg_counts: list[int],
+    temperature: float,
+    alpha: float = 0.3,
+) -> Tensor:
+    """Phase 2 loss: L_t2v^hard + α · L_v2t^in-batch.
+    Primary signal: t→v with hard negatives. Regularizer: v→t in-batch only
+    (no hard negs on this side) — keeps the video encoder receiving bidirectional
+    gradient so retrieval does not drift during 3 epochs of asymmetric training."""
 ```
 
 ### `src/var/metrics.py`
@@ -242,8 +282,15 @@ def mine_hard_negatives(
     k: int = 8,
     skip_top: int = 10,
 ) -> dict[int, list[str]]:
-    """For each query i, rank all videos; filter same-category; skip top-`skip_top`;
-    return the next k paths. Raises RuntimeError if any query has <k candidates."""
+    """For each query i, rank all videos by sim(q_i, v_j) descending;
+    filter out same-category videos; skip top-`skip_top` (to avoid false negatives);
+    return next k paths.
+
+    Graceful fallback (logs a warning per degradation, never silently returns <k):
+      1. If <k candidates after filter + skip, retry with skip_top = skip_top // 2.
+      2. If still <k, retry with skip_top = 0.
+      3. If still <k, pad with random same-category videos (different from positive).
+    Returns dict {query_idx: [video_path, ...]} with exactly k paths each."""
 ```
 
 ### `src/var/trainer.py`
@@ -255,7 +302,7 @@ class ContrastiveTrainer:
     def train_phase1(self) -> None:
         """Warmup with symmetric InfoNCE + in-batch negatives.
         Engine model already has LoRA attached (by train.py) via `attach_lora()`.
-        Uses ClassBalancedSampler."""
+        Uses CategoryStratifiedSampler."""
 
     def train_phase2(self) -> None:
         """Hard-neg fine-tune. Engine model is already loaded from Phase1 adapter
@@ -268,9 +315,9 @@ class ContrastiveTrainer:
         4. train_ds.set_hard_negatives(mapping)
         5. engine.model.train() ; train one epoch with hard_neg_infonce
 
-        Loss uses `hard_neg_infonce` only (text→video direction), matching the
-        asymmetric formula in the plan. In-batch negatives (other queries' positives)
-        are included alongside the mined hard negatives."""
+        Loss uses `phase2_combined_loss`: L_t2v^hard + α · L_v2t^in-batch, with
+        α=0.3. Hard negatives only flow into the t→v term; v→t keeps in-batch
+        negatives as a weak regularizer so the video encoder does not drift."""
 
     def evaluate(self) -> dict:
         """In-training eval: R@1/5/10, MedR on eval_ds (max_eval_batches)."""
@@ -348,11 +395,18 @@ wandb_run_name = "phase2-bs4-K8"
 resume_from = "outputs/phase1-warmup/final_adapter"
 num_hard_negatives = 8
 mine_skip_top = 10
+v2t_alpha = 0.3   # regularizer weight for v→t in-batch loss
 ```
 
 ## Data flow
 
 ```
+                      scripts/evaluate.py --zero-shot
+                              │
+                              ▼
+              outputs/eval_baseline.json  (zero-shot R@K, MedR, mAP)
+                              │  (checkpoint-0 reference)
+                              │
 data/T2V_VAR/ucf_crime_train.json   (1610 pairs, 28 duplicate groups)
         │
         ▼   scripts/prepare_data.py
@@ -409,17 +463,18 @@ No pytest/unit tests at this stage (research project, YAGNI).
 1. Create `pyproject.toml`, `src/var/` skeleton (empty modules).
 2. Move `embedding.py` → `src/var/model.py`, add `encode_with_grad` method.
 3. Move `lora_utils.py` logic into `src/var/model.py`.
-4. Move `dataset.py` + `collator.py` → `src/var/data.py`; add `category_from_path`, `ClassBalancedSampler`, and hard-neg support in collator.
+4. Move `dataset.py` + `collator.py` → `src/var/data.py`; add `category_from_path`, `CategoryStratifiedSampler`, and hard-neg support in collator.
 5. Write `src/var/config.py` + migrate configs to `phase1.toml` / `phase2.toml`.
 6. Write `src/var/losses.py` (symmetric + hard-neg InfoNCE).
 7. Write `src/var/metrics.py` (consolidate from `eval_retrieval.py` and `eval_zeroshot_on_the_fly.py`, add `mean_ap`).
 8. Write `src/var/mining.py`.
 9. Write `src/var/trainer.py` (phase1 first, then phase2).
-10. Write entry points: `scripts/prepare_data.py`, `scripts/train.py`, `scripts/evaluate.py`, `scripts/smoke_test.py`.
+10. Write entry points: `scripts/prepare_data.py`, `scripts/train.py`, `scripts/evaluate.py` (with `--zero-shot` flag to run on base model without adapter), `scripts/smoke_test.py`.
 11. Delete old files (see table above).
-12. Smoke test phase1 on 10 samples, 1 step.
-13. Smoke test phase2 mining on 10 samples.
-14. Short README snippet with run commands.
+12. **Zero-shot baseline:** run `evaluate.py --zero-shot`, save to `outputs/eval_baseline.json`. This is the reference point; any fine-tuning that underperforms it is a failure.
+13. Smoke test phase1 on 10 samples, 1 step.
+14. Smoke test phase2 mining on 10 samples.
+15. Short README snippet with run commands (baseline → phase1 → eval → phase2 → eval).
 
 ### Phase dispatch in `scripts/train.py`
 
@@ -443,4 +498,4 @@ trainer.save_checkpoint(output_dir / "final_adapter")
 
 - Exact weight for dedup tie-breaking (random vs longest caption). Default: deterministic "first seen" with fixed seed.
 - Whether to save mined hard negatives per epoch to disk for debugging. Default: keep in memory only; add `--save-mined-negs` flag if needed.
-- Whether Phase 2 should also compute symmetric v→t loss (without hard negs on that side). Default: asymmetric t→v only, matching the plan's formula exactly. If R@K on v→t drops significantly during Phase 2, revisit.
+- Value of `v2t_alpha` in phase2_combined_loss. Default 0.3. If t→v R@K plateaus while v→t degrades, tune in [0.1, 0.5].
