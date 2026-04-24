@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
 import sys
 from pathlib import Path
 from typing import List, Sequence
@@ -15,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from var.config import load_config
 from var.data import QueryVideoDataset, build_positive_groups
+from var.iolog import log, new_log_filename, tee_to_file
 from var.metrics import rank_positions, summarize
 from var.model import QwenEmbeddingEngine, load_adapter
 
@@ -42,14 +42,11 @@ def _encode(engine, items: Sequence[dict], batch_size: int, label: str) -> np.nd
         end = min(start + batch_size, n)
         emb = engine.encode_items(list(items[start:end]), normalize=True).detach().float().cpu().numpy()
         out.append(emb.astype(np.float32, copy=False))
-        print(f"[encode {label}] {end}/{n}")
+        log("encode", f"{label} {end}/{n}")
     return np.concatenate(out, axis=0)
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    args = parse_args()
-
+def _run(args: argparse.Namespace) -> Path:
     if args.zero_shot and args.adapter is not None:
         raise ValueError("Use either --zero-shot or --adapter, not both.")
 
@@ -61,8 +58,8 @@ def main() -> None:
         mode = f"adapter={adapter_path}"
     else:
         mode = "zero-shot"
-    print(f"Mode: {mode}")
-    print(f"Device: {engine.device}")
+    log("eval", f"mode: {mode}")
+    log("eval", f"device: {engine.device}")
 
     data_file = args.data_file or Path(cfg.data.eval_file)
     data_path = data_file if data_file.is_absolute() else REPO_ROOT / data_file
@@ -73,7 +70,7 @@ def main() -> None:
         video_column=cfg.data.video_column,
         server_prefix=cfg.data.server_prefix,
     )
-    print(f"Samples: {len(ds)}")
+    log("eval", f"samples: {len(ds)}")
 
     t2v_queries, t2v_videos, t2v_pos = build_positive_groups(ds, "t2v")
     v2t_videos, v2t_queries, v2t_pos = build_positive_groups(ds, "v2t")
@@ -115,8 +112,22 @@ def main() -> None:
         out_path = REPO_ROOT / "outputs" / f"{stem}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[saved] {out_path}")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+    log("eval", f"t2v {t2v_metrics}")
+    log("eval", f"v2t {v2t_metrics}")
+    log("eval", f"saved: {out_path}")
+    return out_path
+
+
+def main() -> None:
+    args = parse_args()
+    log_dir = REPO_ROOT / "outputs" / "logs"
+    stem = "eval_baseline" if args.zero_shot else "eval"
+    log_path = log_dir / new_log_filename(stem)
+    with tee_to_file(log_path):
+        log("eval", f"log file: {log_path}")
+        _run(args)
+        log("eval", "done.")
 
 
 if __name__ == "__main__":

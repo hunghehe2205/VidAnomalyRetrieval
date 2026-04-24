@@ -65,6 +65,13 @@ class Phase2Config:
 
 
 @dataclass
+class HubConfig:
+    push_to_hub: bool = False
+    model_id: str = ""
+    private: bool = True
+
+
+@dataclass
 class RunConfig:
     phase: str
     seed: int
@@ -73,6 +80,7 @@ class RunConfig:
     lora: LoraConfig
     training: TrainingConfig
     phase2: Optional[Phase2Config] = None
+    hub: Optional[HubConfig] = None
 
 
 def load_config(path: Path) -> RunConfig:
@@ -94,8 +102,11 @@ def load_config(path: Path) -> RunConfig:
         lora=LoraConfig(**raw["lora"]),
         training=TrainingConfig(**raw["training"]),
         phase2=Phase2Config(**raw["phase2"]) if phase == "phase2" else None,
+        hub=HubConfig(**raw["hub"]) if "hub" in raw else None,
     )
 
     if phase == "phase2" and cfg.phase2 is None:
         raise ValueError("Phase 2 config must include a [phase2] section.")
+    if cfg.hub is not None and cfg.hub.push_to_hub and not cfg.hub.model_id:
+        raise ValueError("hub.push_to_hub=true requires a non-empty hub.model_id.")
     return cfg

@@ -68,9 +68,38 @@ python scripts/evaluate.py \
   --output-json outputs/eval_phase2.json
 ```
 
+## Logs
+
+Every entry script auto-writes its output to a log file (console is also tee'd), so `nohup python scripts/train.py --config configs/phase1.toml &` leaves a readable log behind without manual `> run.log`.
+
+- `scripts/train.py`    → `outputs/<phase-dir>/logs/{phase1,phase2}-YYYYMMDD-HHMMSS.log`
+- `scripts/evaluate.py` → `outputs/logs/eval-YYYYMMDD-HHMMSS.log` (or `eval_baseline-...` with `--zero-shot`)
+- `scripts/smoke_test.py` → `outputs/logs/smoke-YYYYMMDD-HHMMSS.log`
+
+Lines use the format `[HH:MM:SS] [scope] message`. Tail with `tail -f outputs/phase1-warmup/logs/phase1-*.log`.
+
+## W&B
+
+- Set `[training].wandb_project` in the config to enable. Pass `--no-wandb` to disable on a single run.
+- Logged per step: `train/loss`, `train/grad_norm`, `train/lr`, `train/epoch`.
+- Logged per eval step: `eval/loss`, `eval/top1`.
+- Full config (model, lora, data, training, phase2) is attached to the W&B run config.
+
+## Hugging Face Hub push
+
+Optional `[hub]` section in each config:
+
+```toml
+[hub]
+push_to_hub = false     # flip to true to push after training finishes
+model_id = "your-name/qwen3-vl-embedding-phase1"
+private = true
+```
+
+After `trainer` finishes (adapter saved to `final_adapter/`), `scripts/train.py` pushes to the hub if `push_to_hub=true`. Override with `--no-push` to skip on a single run. You must `huggingface-cli login` (or set `HF_TOKEN`) before the first push.
+
 ## Notes
 
 - Single GPU, bf16, gradient checkpointing. No multi-GPU / DeepSpeed.
 - Features are always encoded on-the-fly (no cache) — LoRA weights change every run, so any cached features would be stale.
 - `server_prefix` in config points to where UCF-Crime video files live on disk.
-- W&B: set `[training].wandb_project = ""` to disable, or pass `--no-wandb` to `scripts/train.py`.

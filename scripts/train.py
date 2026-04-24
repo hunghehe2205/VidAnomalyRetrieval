@@ -2,17 +2,18 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from var.config import load_config
+from var.config import RunConfig, load_config
 from var.data import ContrastiveCollator, QueryVideoDataset
+from var.iolog import log, new_log_filename, tee_to_file
 from var.model import QwenEmbeddingEngine, attach_lora, load_adapter
 from var.trainer import ContrastiveTrainer
 
@@ -21,32 +22,55 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Qwen3-VL-Embedding with LoRA (phase1 or phase2).")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument("--no-push", action="store_true", help="Override config's hub.push_to_hub.")
     return p.parse_args()
 
 
-def _maybe_init_wandb(cfg, enabled: bool) -> Optional[Any]:
+def _maybe_init_wandb(cfg: RunConfig, enabled: bool) -> Optional[Any]:
     if not enabled or not cfg.training.wandb_project:
         return None
     try:
         import wandb
     except ImportError:
-        print("[warn] wandb not installed; continuing without W&B.")
+        log("wandb", "not installed; continuing without W&B.")
         return None
     run_name = cfg.training.wandb_run_name.strip() or f"{cfg.phase}-{int(time.time())}"
-    return wandb.init(project=cfg.training.wandb_project, name=run_name, config={
-        "phase": cfg.phase, "seed": cfg.seed,
-        "lr": cfg.training.learning_rate,
-        "bs": cfg.training.per_device_train_batch_size,
-        "temp": cfg.training.temperature,
-    })
+    full_config = {
+        "phase": cfg.phase,
+        "seed": cfg.seed,
+        "model_name_or_path": cfg.model.model_name_or_path,
+        "attn_implementation": cfg.model.attn_implementation,
+        "lora": asdict(cfg.lora),
+        "data": asdict(cfg.data),
+        "training": asdict(cfg.training),
+    }
+    if cfg.phase2 is not None:
+        full_config["phase2"] = asdict(cfg.phase2)
+    return wandb.init(project=cfg.training.wandb_project, name=run_name, config=full_config)
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    args = parse_args()
+def _maybe_push_to_hub(cfg: RunConfig, engine: QwenEmbeddingEngine, disabled: bool) -> None:
+    if disabled or cfg.hub is None or not cfg.hub.push_to_hub:
+        return
+    if not cfg.hub.model_id:
+        log("hub", "push_to_hub=true but model_id empty — skipping.")
+        return
 
-    cfg = load_config(REPO_ROOT / args.config)
+    log("hub", f"pushing adapter to {cfg.hub.model_id} (private={cfg.hub.private}) ...")
+    model = engine.model
+    if not hasattr(model, "push_to_hub"):
+        log("hub", "model has no push_to_hub method — skipping.")
+        return
+    try:
+        model.push_to_hub(cfg.hub.model_id, private=cfg.hub.private)
+        if hasattr(engine.processor, "push_to_hub"):
+            engine.processor.push_to_hub(cfg.hub.model_id, private=cfg.hub.private)
+        log("hub", f"pushed to {cfg.hub.model_id}")
+    except Exception as exc:
+        log("hub", f"push failed: {exc!r}")
 
+
+def _run(cfg: RunConfig, args: argparse.Namespace) -> None:
     engine = QwenEmbeddingEngine.from_config(cfg, repo_root=REPO_ROOT)
 
     if cfg.phase == "phase1":
@@ -84,7 +108,6 @@ def main() -> None:
     ) if eval_file.exists() else None
 
     collator = ContrastiveCollator(engine=engine, fps=cfg.data.fps, max_frames=cfg.data.max_frames)
-
     wandb_run = _maybe_init_wandb(cfg, enabled=not args.no_wandb)
 
     trainer = ContrastiveTrainer(
@@ -96,13 +119,37 @@ def main() -> None:
         wandb_run=wandb_run,
     )
 
+    log("train", f"phase={cfg.phase} train_samples={len(train_ds)} "
+                 f"eval_samples={len(eval_ds) if eval_ds else 0}")
+    log("train", f"bs={cfg.training.per_device_train_batch_size} "
+                 f"lr={cfg.training.learning_rate} epochs={cfg.training.num_train_epochs} "
+                 f"temp={cfg.training.temperature}")
+
     if cfg.phase == "phase1":
         trainer.train_phase1()
     else:
         trainer.train_phase2()
 
+    _maybe_push_to_hub(cfg, engine, disabled=args.no_push)
+
     if wandb_run is not None:
         wandb_run.finish()
+
+
+def main() -> None:
+    args = parse_args()
+    cfg = load_config(REPO_ROOT / args.config)
+
+    log_dir = Path(cfg.training.output_dir)
+    if not log_dir.is_absolute():
+        log_dir = REPO_ROOT / log_dir
+    log_path = log_dir / "logs" / new_log_filename(cfg.phase)
+
+    with tee_to_file(log_path):
+        log("train", f"log file: {log_path}")
+        log("train", f"config:   {args.config}")
+        _run(cfg, args)
+        log("train", "done.")
 
 
 if __name__ == "__main__":

@@ -41,3 +41,8 @@ lora_dropout = 0.05
 bias = "none"
 task_type = "FEATURE_EXTRACTION"
 target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
+
+[hub]
+push_to_hub = false
+model_id = "hungnghehe/qwen3-vl-embedding-phase1"
+private = true

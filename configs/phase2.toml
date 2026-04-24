@@ -47,3 +47,8 @@ resume_from = "outputs/phase1-warmup/final_adapter"
 num_hard_negatives = 8
 mine_skip_top = 10
 v2t_alpha = 0.3
+
+[hub]
+push_to_hub = false
+model_id = "hungnghehe/qwen3-vl-embedding-phase2"
+private = true

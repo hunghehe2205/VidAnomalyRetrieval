@@ -4,7 +4,13 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from var.iolog import log
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +47,8 @@ def main() -> None:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[prepare_data] input={len(raw)} kept={len(kept)} removed={len(raw) - len(kept)}")
-    print(f"[prepare_data] wrote {args.output}")
+    log("prepare_data", f"input={len(raw)} kept={len(kept)} removed={len(raw) - len(kept)}")
+    log("prepare_data", f"wrote {args.output}")
 
 
 if __name__ == "__main__":

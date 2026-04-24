@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
-import torch
 from torch.utils.data import DataLoader
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -14,6 +12,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from var.config import load_config
 from var.data import ContrastiveCollator, QueryVideoDataset
+from var.iolog import log, new_log_filename, tee_to_file
 from var.model import QwenEmbeddingEngine, attach_lora, count_parameters
 
 
@@ -25,19 +24,16 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    args = parse_args()
-
+def _run(args: argparse.Namespace) -> None:
     cfg = load_config(REPO_ROOT / args.config)
     engine = QwenEmbeddingEngine.from_config(cfg, repo_root=REPO_ROOT)
     engine.model = attach_lora(engine.model, cfg.lora)
     trainable, total = count_parameters(engine.model)
-    print(f"Trainable: {trainable:,} / {total:,}")
-    print(f"Device: {engine.device}")
+    log("smoke", f"trainable: {trainable:,} / {total:,}")
+    log("smoke", f"device: {engine.device}")
 
     if args.skip_forward:
-        print("Skipping forward pass.")
+        log("smoke", "skipping forward pass.")
         return
 
     train_path = REPO_ROOT / cfg.data.train_file
@@ -55,10 +51,18 @@ def main() -> None:
     q = engine.encode_with_grad(batch["query_inputs"])
     v = engine.encode_with_grad(batch["positive_inputs"])
     scores = q @ v.T
-    print(f"query shape: {tuple(q.shape)}")
-    print(f"video shape: {tuple(v.shape)}")
-    print(f"score diag : {scores.diag().detach().cpu().tolist()}")
-    print("Smoke test passed.")
+    log("smoke", f"query shape: {tuple(q.shape)}")
+    log("smoke", f"video shape: {tuple(v.shape)}")
+    log("smoke", f"score diag : {scores.diag().detach().cpu().tolist()}")
+    log("smoke", "passed.")
+
+
+def main() -> None:
+    args = parse_args()
+    log_path = REPO_ROOT / "outputs" / "logs" / new_log_filename("smoke")
+    with tee_to_file(log_path):
+        log("smoke", f"log file: {log_path}")
+        _run(args)
 
 
 if __name__ == "__main__":

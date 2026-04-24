@@ -1,15 +1,13 @@
 """mining — encode corpus + mine hard negatives (with graceful fallback)."""
 from __future__ import annotations
 
-import logging
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
 from var.data import QueryVideoDataset
+from var.iolog import log
 from var.model import QwenEmbeddingEngine
-
-log = logging.getLogger("var.mining")
 
 
 def encode_corpus(
@@ -131,10 +129,10 @@ def mine_hard_negatives(
         result[i] = [video_paths[j] for j in picked[:k]]
 
     if degraded_relaxed:
-        log.warning("mining: %d queries used relaxed skip_top=%d", degraded_relaxed, skip_top // 2)
+        log("mining", f"warn: {degraded_relaxed} queries relaxed to skip_top={skip_top // 2}")
     if degraded_zero:
-        log.warning("mining: %d queries used skip_top=0", degraded_zero)
+        log("mining", f"warn: {degraded_zero} queries used skip_top=0")
     if degraded_samecat:
-        log.warning("mining: %d queries padded with same-category negatives", degraded_samecat)
+        log("mining", f"warn: {degraded_samecat} queries padded with same-category negatives")
 
     return result

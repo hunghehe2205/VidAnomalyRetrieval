@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import json
-import logging
-import math
 import random
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -21,14 +19,11 @@ from var.data import (
     CategoryStratifiedSampler,
     ContrastiveCollator,
     QueryVideoDataset,
-    build_positive_groups,
 )
+from var.iolog import log
 from var.losses import phase2_combined_loss, symmetric_infonce
-from var.metrics import rank_positions, summarize
 from var.mining import encode_corpus, mine_hard_negatives
 from var.model import QwenEmbeddingEngine, count_parameters
-
-log = logging.getLogger("var.trainer")
 
 
 def _set_seed(seed: int) -> None:
@@ -73,8 +68,8 @@ class ContrastiveTrainer:
                 model.config.use_cache = False
 
         trainable, total = count_parameters(model)
-        log.info("Trainable params: %s / %s", f"{trainable:,}", f"{total:,}")
-        log.info("Device: %s", self.engine.device)
+        log("trainer", f"trainable params: {trainable:,} / {total:,}")
+        log("trainer", f"device: {self.engine.device}")
 
     # ----- loaders -----
 
@@ -168,8 +163,8 @@ class ContrastiveTrainer:
         optimizer,
         scheduler,
         total_steps: int,
-        compute_loss_fn,
-        on_epoch_start,
+        compute_loss_fn: Callable[[Dict[str, Any]], torch.Tensor],
+        on_epoch_start: Optional[Callable[[int], None]],
     ) -> None:
         t = self.cfg.training
         step = 0
@@ -184,10 +179,13 @@ class ContrastiveTrainer:
                 loss = compute_loss_fn(batch)
                 loss.backward()
 
+                grad_norm = 0.0
                 if t.max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        [p for p in self.engine.model.parameters() if p.requires_grad],
-                        t.max_grad_norm,
+                    grad_norm = float(
+                        torch.nn.utils.clip_grad_norm_(
+                            [p for p in self.engine.model.parameters() if p.requires_grad],
+                            t.max_grad_norm,
+                        )
                     )
 
                 optimizer.step()
@@ -198,19 +196,25 @@ class ContrastiveTrainer:
                 if step % max(1, t.logging_steps) == 0:
                     elapsed = (time.time() - started) / 60.0
                     lr = float(scheduler.get_last_lr()[0])
-                    log.info(
-                        "[%s step %d/%d] loss=%.4f lr=%.2e elapsed=%.1fm",
-                        self.cfg.phase, step, total_steps, float(loss.item()), lr, elapsed,
+                    log(
+                        self.cfg.phase,
+                        f"step {step}/{total_steps} loss={float(loss.item()):.4f} "
+                        f"grad_norm={grad_norm:.3f} lr={lr:.2e} elapsed={elapsed:.1f}m",
                     )
                     if self.wandb is not None:
                         self.wandb.log(
-                            {"train/loss": float(loss.item()), "train/lr": lr, "train/epoch": epoch},
+                            {
+                                "train/loss": float(loss.item()),
+                                "train/grad_norm": grad_norm,
+                                "train/lr": lr,
+                                "train/epoch": epoch,
+                            },
                             step=step,
                         )
 
                 if t.eval_steps > 0 and step % t.eval_steps == 0 and eval_loader is not None:
                     metrics = self._eval_inbatch(eval_loader)
-                    log.info("[eval step %d] %s", step, metrics)
+                    log("eval", f"step {step} loss={metrics['loss']:.4f} top1={metrics['top1']:.4f}")
                     if self.wandb is not None:
                         self.wandb.log({f"eval/{k}": v for k, v in metrics.items()}, step=step)
 
@@ -240,7 +244,7 @@ class ContrastiveTrainer:
     # ----- phase2 remining -----
 
     def _remine_before_epoch(self, epoch: int) -> None:
-        log.info("[phase2] re-mining hard negatives before epoch %d", epoch)
+        log("phase2", f"re-mining hard negatives before epoch {epoch}")
         self.engine.model.eval()
         with torch.no_grad():
             q_mat, v_mat = encode_corpus(
@@ -292,7 +296,7 @@ class ContrastiveTrainer:
         path.mkdir(parents=True, exist_ok=True)
         self.engine.model.save_pretrained(path)
         self.engine.processor.save_pretrained(path)
-        log.info("[save] %s", path)
+        log("save", str(path))
 
     def _save_final(self) -> None:
         self._save(self.output_dir / "final_adapter")
