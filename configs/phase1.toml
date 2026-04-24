@@ -29,6 +29,7 @@ logging_steps = 10
 save_steps = 50
 eval_steps = 50
 max_eval_batches = 50
+retrieval_eval_steps = 50
 gradient_checkpointing = true
 dataloader_num_workers = 4
 bf16 = true

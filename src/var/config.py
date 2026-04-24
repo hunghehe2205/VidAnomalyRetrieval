@@ -53,6 +53,7 @@ class TrainingConfig:
     dataloader_num_workers: int
     bf16: bool
     lr_scheduler_type: str = "cosine"
+    retrieval_eval_steps: int = 0
     wandb_project: str = ""
     wandb_run_name: str = ""
 
