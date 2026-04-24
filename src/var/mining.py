@@ -1,13 +1,35 @@
 """mining — encode corpus + mine hard negatives (with graceful fallback)."""
 from __future__ import annotations
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
 
 from var.data import QueryVideoDataset
 from var.iolog import log
 from var.model import QwenEmbeddingEngine
+
+
+class _ItemDataset(Dataset):
+    """Lightweight dataset wrapper so DataLoader workers can parallelize preprocessing."""
+
+    def __init__(self, items: List[Dict[str, Any]]) -> None:
+        self._items = items
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        return self._items[idx]
+
+
+def _make_preprocess_collator(engine: QwenEmbeddingEngine):
+    """Collate fn: runs engine.preprocess in the worker process (decode + processor)."""
+    def _collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return engine.preprocess(batch)
+    return _collate
 
 
 def encode_corpus(
@@ -17,30 +39,50 @@ def encode_corpus(
     query_instruction: str = "Retrieve videos relevant to the user's query.",
     fps: float = 1.0,
     max_frames: int = 16,
+    num_workers: int = 4,
+    log_every: int = 20,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Encode ALL queries and ALL positive videos. Returns (q_matrix, v_matrix), both (N, D)."""
+    """Encode ALL queries and ALL positive videos. Returns (q_matrix, v_matrix), both (N, D).
+
+    Uses DataLoader workers so a slow/bad video in one worker does not stall the pipeline
+    (mirrors Phase 1 train's parallel decoding pattern).
+    """
     queries = dataset.queries
     videos = dataset.video_paths
     if len(queries) != len(videos):
         raise RuntimeError("queries and videos length mismatch.")
 
-    def _run(items_builder, n: int) -> np.ndarray:
+    collate = _make_preprocess_collator(engine)
+
+    def _run(items: List[Dict[str, Any]], label: str) -> np.ndarray:
+        total = len(items)
+        if total == 0:
+            return np.zeros((0, 1), dtype=np.float32)
+        loader = DataLoader(
+            _ItemDataset(items),
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate,
+            num_workers=num_workers,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=False,
+        )
         out: List[np.ndarray] = []
-        for start in range(0, n, batch_size):
-            end = min(start + batch_size, n)
-            items = items_builder(start, end)
-            emb = engine.encode_items(items, normalize=True).detach().float().cpu().numpy()
-            out.append(emb.astype(np.float32, copy=False))
+        done = 0
+        for step, model_inputs in enumerate(loader, start=1):
+            with torch.no_grad():
+                emb = engine.encode_with_grad(model_inputs)
+            out.append(emb.detach().float().cpu().numpy().astype(np.float32, copy=False))
+            done = min(done + batch_size, total)
+            if step % log_every == 0 or done == total:
+                log("mining", f"encoded {label} {done}/{total}")
         return np.concatenate(out, axis=0)
 
-    q_mat = _run(
-        lambda s, e: [{"text": q, "instruction": query_instruction} for q in queries[s:e]],
-        len(queries),
-    )
-    v_mat = _run(
-        lambda s, e: [{"video": v, "fps": fps, "max_frames": max_frames} for v in videos[s:e]],
-        len(videos),
-    )
+    q_items = [{"text": q, "instruction": query_instruction} for q in queries]
+    v_items = [{"video": v, "fps": fps, "max_frames": max_frames} for v in videos]
+
+    q_mat = _run(q_items, "queries")
+    v_mat = _run(v_items, "videos")
     return q_mat, v_mat
 
 

@@ -13,6 +13,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from var.config import load_config
 from var.data import ContrastiveCollator, QueryVideoDataset
 from var.iolog import log, new_log_filename, tee_to_file
+from var.losses import symmetric_infonce
 from var.model import QwenEmbeddingEngine, attach_lora, count_parameters, load_adapter
 
 
@@ -71,9 +72,20 @@ def _run(args: argparse.Namespace) -> None:
     q = engine.encode_with_grad(batch["query_inputs"])
     v = engine.encode_with_grad(batch["positive_inputs"])
     scores = q @ v.T
-    log("smoke", f"query shape: {tuple(q.shape)}")
-    log("smoke", f"video shape: {tuple(v.shape)}")
-    log("smoke", f"score diag : {scores.diag().detach().cpu().tolist()}")
+    diag = scores.diag().detach().cpu().tolist()
+    q_shape, v_shape = tuple(q.shape), tuple(v.shape)
+
+    # Mimic trainer: backward then release graph + grads to free activations.
+    # Without this, smoke OOMs at bs≥2 even though trainer runs fine.
+    loss = symmetric_infonce(q, v, cfg.training.temperature)
+    loss.backward()
+    for p in engine.model.parameters():
+        p.grad = None
+
+    log("smoke", f"query shape: {q_shape}")
+    log("smoke", f"video shape: {v_shape}")
+    log("smoke", f"score diag : {diag}")
+    log("smoke", f"loss       : {float(loss.item()):.4f}")
     log("smoke", "passed.")
 
 

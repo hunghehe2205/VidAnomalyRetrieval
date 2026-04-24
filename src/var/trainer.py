@@ -285,6 +285,7 @@ class ContrastiveTrainer:
                 batch_size=self.cfg.training.per_device_eval_batch_size,
                 fps=self.cfg.data.fps,
                 max_frames=self.cfg.data.max_frames,
+                num_workers=self.cfg.training.dataloader_num_workers,
             )
         mapping = mine_hard_negatives(
             query_emb=q_mat,
