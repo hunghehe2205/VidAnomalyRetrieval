@@ -129,13 +129,19 @@ class ContrastiveTrainer:
         optimizer, scheduler = self._build_optimizer(total_steps)
 
         self.engine.model.train()
+        if self.cfg.phase2.remine_every_epoch:
+            on_epoch_start = self._remine_before_epoch
+        else:
+            def on_epoch_start(epoch: int) -> None:
+                if epoch == 0:
+                    self._remine_before_epoch(epoch)
         self._run_epochs(
             loader=loader,
             optimizer=optimizer,
             scheduler=scheduler,
             total_steps=total_steps,
             compute_loss_fn=self._phase2_loss_step,
-            on_epoch_start=self._remine_before_epoch,
+            on_epoch_start=on_epoch_start,
         )
         self._save_final()
 
@@ -147,7 +153,7 @@ class ContrastiveTrainer:
         optimizer = AdamW(params, lr=t.learning_rate, weight_decay=t.weight_decay)
         warmup = int(total_steps * t.warmup_ratio)
         scheduler = get_scheduler(
-            name="cosine",
+            name=t.lr_scheduler_type,
             optimizer=optimizer,
             num_warmup_steps=warmup,
             num_training_steps=max(1, total_steps),

@@ -52,6 +52,7 @@ class TrainingConfig:
     gradient_checkpointing: bool
     dataloader_num_workers: int
     bf16: bool
+    lr_scheduler_type: str = "cosine"
     wandb_project: str = ""
     wandb_run_name: str = ""
 
@@ -61,6 +62,7 @@ class Phase2Config:
     resume_from: str
     num_hard_negatives: int
     mine_skip_top: int
+    remine_every_epoch: bool = True
     v2t_alpha: float = 0.3
 
 
