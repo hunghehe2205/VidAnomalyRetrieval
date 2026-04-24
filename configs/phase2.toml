@@ -44,7 +44,7 @@ task_type = "FEATURE_EXTRACTION"
 target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
 
 [phase2]
-resume_from = "outputs/phase1-warmup/final_adapter"
+resume_from = "outputs/phase1-warmup-v2/final_adapter"
 num_hard_negatives = 8
 mine_skip_top = 10                        
 remine_every_epoch = true                 
