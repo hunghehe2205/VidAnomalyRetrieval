@@ -70,3 +70,4 @@ frames/
 *.tar
 *.gz
 *.rar
+.env
