@@ -1,0 +1,57 @@
+phase = "phase2"
+seed = 42
+
+[model]
+model_name_or_path = "Qwen/Qwen3-VL-Embedding-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file = "data/T2V_VAR/ucf_crime_train_dedup.json"
+eval_file = "data/T2V_VAR/ucf_crime_test.json"
+query_column = "English Text"
+video_column = "Video Name"
+server_prefix = "/workspace/VidAnomalyRetrieval/UCF-Crime"
+fps = 1
+max_frames = 32
+
+[training]
+output_dir = "outputs/phase3-bs4"
+per_device_train_batch_size = 4
+per_device_eval_batch_size = 4
+num_train_epochs = 2
+learning_rate = 2.0e-5
+weight_decay = 0.01
+warmup_ratio = 0.1
+temperature = 0.05
+max_grad_norm = 1.0
+lr_scheduler_type = "cosine"
+logging_steps = 10
+save_steps = 50
+eval_steps = 50
+max_eval_batches = 30
+retrieval_eval_steps = 100
+gradient_checkpointing = true
+dataloader_num_workers = 4
+bf16 = true
+wandb_project = "Finetune-VAR-Qwen3VLembedding"
+wandb_run_name = "phase3-bs4-K4-from-p1ckpt200"
+
+[lora]
+r = 32
+lora_alpha = 32
+lora_dropout = 0.05
+bias = "none"
+task_type = "FEATURE_EXTRACTION"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
+
+[phase2]
+resume_from = "outputs/phase1-warmup-v2/checkpoint-200"
+num_hard_negatives = 4
+mine_skip_top = 10
+remine_every_epoch = true
+v2t_alpha = 0.3
+
+[hub]
+push_to_hub = false
+model_id = "hungnghehe/qwen3-vl-embedding-phase3"
+private = true
