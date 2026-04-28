@@ -7,7 +7,7 @@ class Temporal_Sampler():
     def __init__(self, ckpt_path, device):
         self.device = device
         self.anomaly_scorer = URDMU().to(device)
-        self.anomaly_scorer.load_state_dict(torch.load(ckpt_path))
+        self.anomaly_scorer.load_state_dict(torch.load(ckpt_path, map_location=device))
         self.tau = 0.1
 
     def get_anomaly_scores(self, pixel_values, model):
