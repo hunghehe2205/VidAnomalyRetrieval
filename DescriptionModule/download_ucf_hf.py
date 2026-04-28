@@ -15,3 +15,10 @@ snapshot_download(
     local_dir="Org_vadclip",   # mặc định là model
     token=hf_token,
 )
+
+# model
+snapshot_download(
+    repo_id="hungnghehe/Holmes-VAU-ATS",
+    local_dir="Holmes-VAU-ATS",   # mặc định là model
+    token=hf_token,
+)
