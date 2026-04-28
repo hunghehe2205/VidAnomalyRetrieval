@@ -67,6 +67,24 @@ def generate(video_path, prompt, model, tokenizer, generation_config, sampler, d
                                 num_patches_list=num_patches_list, history=history, return_history=True)
     return response, history, frame_indices, anomaly_score
 
+def caption_clip(vr, frame_range, prompt, model, tokenizer, generation_config, select_frames=12):
+    """Uniformly sample `select_frames` frames inside `frame_range` and caption that clip."""
+    start_f, end_f = int(frame_range[0]), int(frame_range[1])
+    end_f = min(end_f, len(vr))
+    start_f = max(0, min(start_f, end_f - 1))
+    fps = float(vr.get_avg_fps())
+    bound = (start_f / fps, end_f / fps)
+    frame_indices = get_index(bound, fps, max_frame=end_f - 1, first_idx=start_f, num_segments=select_frames)
+    frame_indices = list(map(int, frame_indices))
+    pixel_values, num_patches_list = get_pixel_values(vr, frame_indices)
+    pixel_values = pixel_values.to(torch.bfloat16).to(model.device)
+    video_prefix = ''.join([f'Frame{i+1}: <image>\n' for i in range(len(num_patches_list))])
+    question = video_prefix + prompt
+    response, _ = model.chat(tokenizer, pixel_values, question, generation_config,
+                             num_patches_list=num_patches_list, history=None, return_history=True)
+    return response, frame_indices
+
+
 def show_smapled_video(vr, idx_list=None, segment=None, labels=None):
     if idx_list is None:
         if segment is None:
