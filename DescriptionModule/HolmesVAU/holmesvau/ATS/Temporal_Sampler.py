@@ -9,9 +9,12 @@ class Temporal_Sampler():
         self.anomaly_scorer = URDMU().to(device)
         self.anomaly_scorer.load_state_dict(torch.load(ckpt_path, map_location=device))
         self.tau = 0.1
+        self.batch_size = 16  # ViT forward batch in get_anomaly_scores; lower for tight VRAM
 
     def get_anomaly_scores(self, pixel_values, model):
-        def batchify(pixel_values, batch_size=16):
+        batch_size = self.batch_size
+
+        def batchify(pixel_values, batch_size=batch_size):
             N = pixel_values.shape[0]
             batches = []  
             for i in range(0, N, batch_size):   

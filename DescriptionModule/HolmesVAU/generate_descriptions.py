@@ -152,11 +152,15 @@ def main():
     ap.add_argument("--select_frames", type=int, default=12)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="debug: cap videos per split (0 = no cap)")
+    ap.add_argument("--ats_batch_size", type=int, default=8,
+                    help="ViT forward batch in the ATS dense pre-pass. Lower for tight VRAM.")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading Holmes-VAU on {device}...")
     model, tokenizer, generation_config, sampler = load_model(args.mllm_path, args.sampler_path, device)
+    sampler.batch_size = args.ats_batch_size
+    print(f"ATS batch_size = {sampler.batch_size}")
 
     splits = ["train", "test"] if args.split == "both" else [args.split]
     for s in splits:
