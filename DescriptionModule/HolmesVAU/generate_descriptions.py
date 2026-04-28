@@ -23,6 +23,7 @@ import random
 import sys
 import traceback
 
+import numpy as np
 import torch
 from decord import VideoReader, cpu
 from tqdm import tqdm
@@ -82,24 +83,33 @@ def process_video(video_path, model, tokenizer, generation_config, sampler, args
     fps = float(vr.get_avg_fps())
     num_frames = len(vr)
 
-    clips_info = []
+    # Always emit K clips (per design: even Normal / short videos need captions).
     if anomaly_score is not None:
         frame_score = upsample_to_frames(anomaly_score, num_frames, snippet_size=args.snippet_size)
-        clip_length_frames = int(round(args.clip_sec * fps))
-        clips_frame = select_clips(frame_score, K=args.K, clip_length=clip_length_frames)
+    else:
+        # Short video path: no anomaly map -> flat score, select_clips spreads K picks uniformly.
+        frame_score = np.ones(num_frames, dtype=np.float64)
 
-        for frame_range in clips_frame:
-            prompt = rng.choice(DESCRIPTION_PROMPTS)
-            pred, _ = caption_clip(
-                vr, frame_range, prompt, model, tokenizer, generation_config,
-                select_frames=args.select_frames,
-                frame_score=frame_score,
-            )
-            clips_info.append({
-                "frame_range": [int(frame_range[0]), int(frame_range[1])],
-                "prompt": prompt,
-                "caption": pred,
-            })
+    clip_length_frames = int(round(args.clip_sec * fps))
+    # Shrink clip width if K windows of clip_sec don't fit, so we still get K non-overlapping clips.
+    if clip_length_frames * args.K > num_frames:
+        clip_length_frames = max(1, num_frames // args.K)
+
+    clips_frame = select_clips(frame_score, K=args.K, clip_length=clip_length_frames)
+
+    clips_info = []
+    for frame_range in clips_frame:
+        prompt = rng.choice(DESCRIPTION_PROMPTS)
+        pred, _ = caption_clip(
+            vr, frame_range, prompt, model, tokenizer, generation_config,
+            select_frames=args.select_frames,
+            frame_score=frame_score,
+        )
+        clips_info.append({
+            "frame_range": [int(frame_range[0]), int(frame_range[1])],
+            "prompt": prompt,
+            "caption": pred,
+        })
 
     return {
         "fps": fps,
