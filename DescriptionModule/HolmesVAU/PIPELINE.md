@@ -133,30 +133,39 @@ Edge cases handled inside `pick_frames`:
 - `len(clip) <= select_frames` or near-zero scores → fall back to uniform
   `np.linspace`. Mirrors the original sampler's fallback.
 
-## Output schema (`outputs/descriptions_{train,test}.jsonl`)
+## Output schema (`outputs/descriptions_{train,test}.json`)
 
-One line per video, written incrementally so the script resumes after a crash:
+A single pretty-printed JSON array of records, rewritten atomically (write to
+`.tmp`, then `os.replace`) after every video so the file is always valid and
+crash-safe. Resume reads the array, builds `{r["video"]}`, and skips finished
+videos.
 
 ```json
-{
-  "video": "Abuse/Abuse001_x264.mp4",
-  "fps": 30.0,
-  "num_frames": 5400,
-  "video_prompt": "Describe the anomaly events observed in the video.",
-  "video_caption": "...",
-  "video_frame_indices": [...],
-  "clips": [
-    {
-      "frame_range": [start_f, end_f],
-      "frame_indices": [...],
-      "prompt": "...",
-      "caption": "..."
-    },
-    ...
-  ],
-  "elapsed_sec": 12.3
-}
+[
+  {
+    "video": "Abuse/Abuse001_x264.mp4",
+    "fps": 30.0,
+    "num_frames": 5400,
+    "video_prompt": "Describe the anomaly events observed in the video.",
+    "video_caption": "...",
+    "video_frame_indices": [...],
+    "clips": [
+      {
+        "frame_range": [start_f, end_f],
+        "frame_indices": [...],
+        "prompt": "...",
+        "caption": "..."
+      }
+    ],
+    "elapsed_sec": 12.3
+  }
+]
 ```
+
+Trade-off: every video triggers a full re-serialize of the array. For ~1900
+records of a few KB each this is well under a second per write — negligible
+next to model inference cost — and buys you a file that opens cleanly in any
+editor while the run is in progress.
 
 `anomaly_score` itself is **not** persisted — the per-frame map is fully
 determined by the snippet pass plus a deterministic interpolation, and the

@@ -31,6 +31,25 @@ export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:Tr
 cd "$(dirname "$0")"
 mkdir -p "$OUT_DIR"
 
+# Background mode: re-exec self under nohup, write log + pid, then detach.
+#   BG=1 bash run_descriptions.sh               # detach, log to outputs/
+#   tail -f outputs/run_*.log                   # follow
+#   kill $(cat outputs/run.pid)                 # stop
+if [[ "${BG:-0}" == "1" && -z "${_LAUNCHED_BG:-}" ]]; then
+    LOG="$OUT_DIR/run_$(date +%Y%m%d_%H%M%S).log"
+    PID="$OUT_DIR/run.pid"
+    _LAUNCHED_BG=1 nohup bash "$0" "$@" > "$LOG" 2>&1 < /dev/null &
+    BG_PID=$!
+    echo "$BG_PID" > "$PID"
+    disown "$BG_PID" 2>/dev/null || true
+    echo "[run_descriptions] launched in background"
+    echo "  pid : $BG_PID  (saved to $PID)"
+    echo "  log : $LOG"
+    echo "  tail: tail -f $LOG"
+    echo "  stop: kill \$(cat $PID)"
+    exit 0
+fi
+
 echo "[run_descriptions] split=$SPLIT  ATS_BATCH=$ATS_BATCH  K=$K  clip_sec=$CLIP_SEC"
 echo "[run_descriptions] out_dir=$OUT_DIR"
 

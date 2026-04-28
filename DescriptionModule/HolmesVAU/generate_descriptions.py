@@ -47,19 +47,27 @@ def read_split(list_file):
         return [ln.strip() for ln in f if ln.strip()]
 
 
-def already_done(out_path):
-    """Return set of relative video paths already present in out_path."""
-    done = set()
+def load_results(out_path):
+    """Load existing JSON array of records, or [] if absent / corrupt."""
     if not os.path.exists(out_path):
-        return done
-    with open(out_path) as f:
-        for ln in f:
-            try:
-                rec = json.loads(ln)
-                done.add(rec["video"])
-            except Exception:
-                continue
-    return done
+        return []
+    try:
+        with open(out_path) as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError:
+        pass
+    return []
+
+
+def save_results(out_path, results):
+    """Atomic write: dump to .tmp then os.replace, so a crash never leaves the
+    JSON half-written."""
+    tmp = out_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, out_path)
 
 
 def process_video(video_path, model, tokenizer, generation_config, sampler, args, rng):
@@ -107,7 +115,7 @@ def process_video(video_path, model, tokenizer, generation_config, sampler, args
 
 def run_split(split, args, model, tokenizer, generation_config, sampler):
     list_file = os.path.join(args.list_dir, "Anomaly_Train.txt" if split == "train" else "Anomaly_Test.txt")
-    out_path = os.path.join(args.out_dir, f"descriptions_{split}.jsonl")
+    out_path = os.path.join(args.out_dir, f"descriptions_{split}.json")
     err_path = os.path.join(args.out_dir, f"errors_{split}.log")
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -115,13 +123,14 @@ def run_split(split, args, model, tokenizer, generation_config, sampler):
     if args.limit:
         rel_paths = rel_paths[: args.limit]
 
-    done = already_done(out_path)
+    results = load_results(out_path)
+    done = {r["video"] for r in results if "video" in r}
     todo = [p for p in rel_paths if p not in done]
     print(f"[{split}] {len(rel_paths)} total, {len(done)} done, {len(todo)} to process")
 
     rng = random.Random(args.seed)
 
-    with open(out_path, "a") as fout, open(err_path, "a") as ferr:
+    with open(err_path, "a") as ferr:
         for rel in tqdm(todo, desc=f"{split}"):
             video_path = os.path.join(args.video_root, rel)
             t0 = time.time()
@@ -129,8 +138,8 @@ def run_split(split, args, model, tokenizer, generation_config, sampler):
                 rec = process_video(video_path, model, tokenizer, generation_config, sampler, args, rng)
                 rec["video"] = rel
                 rec["elapsed_sec"] = round(time.time() - t0, 2)
-                fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                fout.flush()
+                results.append(rec)
+                save_results(out_path, results)
             except Exception as e:
                 ferr.write(f"{rel}\t{type(e).__name__}: {e}\n")
                 ferr.write(traceback.format_exc() + "\n")
