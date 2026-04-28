@@ -148,16 +148,13 @@ videos.
     "num_frames": 5400,
     "video_prompt": "Describe the anomaly events observed in the video.",
     "video_caption": "...",
-    "video_frame_indices": [...],
     "clips": [
       {
         "frame_range": [start_f, end_f],
-        "frame_indices": [...],
         "prompt": "...",
         "caption": "..."
       }
-    ],
-    "elapsed_sec": 12.3
+    ]
   }
 ]
 ```

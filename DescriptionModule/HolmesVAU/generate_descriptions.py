@@ -21,7 +21,6 @@ import json
 import os
 import random
 import sys
-import time
 import traceback
 
 import torch
@@ -91,14 +90,13 @@ def process_video(video_path, model, tokenizer, generation_config, sampler, args
 
         for frame_range in clips_frame:
             prompt = rng.choice(DESCRIPTION_PROMPTS)
-            pred, frame_idx = caption_clip(
+            pred, _ = caption_clip(
                 vr, frame_range, prompt, model, tokenizer, generation_config,
                 select_frames=args.select_frames,
                 frame_score=frame_score,
             )
             clips_info.append({
                 "frame_range": [int(frame_range[0]), int(frame_range[1])],
-                "frame_indices": [int(i) for i in frame_idx],
                 "prompt": prompt,
                 "caption": pred,
             })
@@ -108,7 +106,6 @@ def process_video(video_path, model, tokenizer, generation_config, sampler, args
         "num_frames": int(num_frames),
         "video_prompt": VIDEO_PROMPT,
         "video_caption": video_pred,
-        "video_frame_indices": [int(i) for i in video_frame_indices],
         "clips": clips_info,
     }
 
@@ -133,11 +130,9 @@ def run_split(split, args, model, tokenizer, generation_config, sampler):
     with open(err_path, "a") as ferr:
         for rel in tqdm(todo, desc=f"{split}"):
             video_path = os.path.join(args.video_root, rel)
-            t0 = time.time()
             try:
                 rec = process_video(video_path, model, tokenizer, generation_config, sampler, args, rng)
-                rec["video"] = rel
-                rec["elapsed_sec"] = round(time.time() - t0, 2)
+                rec = {"video": rel, **rec}
                 results.append(rec)
                 save_results(out_path, results)
             except Exception as e:
