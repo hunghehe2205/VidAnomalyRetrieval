@@ -71,6 +71,65 @@ def select_clips(
     return clips
 
 
+def pick_frames(
+    score: np.ndarray,
+    num_picks: int,
+    tau: float = 0.1,
+    offset: int = 0,
+) -> List[int]:
+    """Density-aware frame picking via cumsum inverse-CDF sampling.
+
+    Same algorithm as Holmes-VAU's `Temporal_Sampler.density_aware_sample`:
+    add `tau` to every score so flat regions are still reachable, take the
+    cumulative sum, then invert it at `num_picks` evenly-spaced quantiles.
+    High-score regions get picked densely, low-score regions sparsely. Falls
+    back to uniform spacing when the slice is too short or near-zero.
+
+    Args:
+        score: 1D array (typically a slice of the per-frame anomaly map).
+        num_picks: number of indices to return.
+        tau: smoothing constant; higher -> more uniform. Default mirrors
+            `Temporal_Sampler.tau = 0.1`.
+        offset: added to every returned index — convenient when `score` is a
+            slice and you want absolute frame indices.
+
+    Returns:
+        Sorted list of int indices (with offset), length == num_picks.
+    """
+    score = np.asarray(score, dtype=np.float64).reshape(-1)
+    T = score.shape[0]
+    if T == 0 or num_picks <= 0:
+        return []
+    if T <= num_picks or score.sum() < 1.0:
+        idxs = np.rint(np.linspace(0, T - 1, num_picks)).astype(int).tolist()
+    else:
+        smoothed = score + tau
+        cumsum = np.concatenate(([0.0], np.cumsum(smoothed)))
+        max_cum = float(cumsum[-1])
+        sample_x = np.linspace(1.0, max_cum, num_picks)
+        sampled = np.interp(sample_x, cumsum, np.arange(T + 1, dtype=np.float64))
+        idxs = [min(T - 1, max(0, int(i))) for i in sampled]
+    return [int(i) + offset for i in idxs]
+
+
+def upsample_to_frames(
+    snippet_score: np.ndarray,
+    num_frames: int,
+    snippet_size: int = 16,
+) -> np.ndarray:
+    """Linearly interpolate per-snippet scores to a per-frame array of length num_frames.
+
+    Snippet i is anchored at its center frame (i * snippet_size + snippet_size/2).
+    Boundary frames take the value of the nearest snippet center (np.interp default).
+    """
+    snippet_score = np.asarray(snippet_score, dtype=np.float64).reshape(-1)
+    T = snippet_score.shape[0]
+    if T == 0 or num_frames <= 0:
+        return np.zeros(max(num_frames, 0), dtype=np.float64)
+    centers = np.arange(T) * snippet_size + snippet_size / 2.0
+    return np.interp(np.arange(num_frames), centers, snippet_score)
+
+
 def snippets_to_frames(
     clips: List[Tuple[int, int]],
     snippet_size: int = 16,

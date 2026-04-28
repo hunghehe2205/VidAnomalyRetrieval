@@ -47,6 +47,7 @@ def generate(video_path, prompt, model, tokenizer, generation_config, sampler, d
         # anomaly-focused sampling
         anomaly_score, sampled_idxs = sampler.density_aware_sample(pixel_values, model, select_frames)
         sparse_pixel_values = pixel_values[sampled_idxs]
+        sampled_idxs = [int(i) for i in sampled_idxs]
         frame_indices, num_patches_list = [dense_frame_indices[i] for i in sampled_idxs], [num_patches_list[i] for i in sampled_idxs]
         print('Sampled frames: ', frame_indices)
     else:
@@ -67,15 +68,23 @@ def generate(video_path, prompt, model, tokenizer, generation_config, sampler, d
                                 num_patches_list=num_patches_list, history=history, return_history=True)
     return response, history, frame_indices, anomaly_score
 
-def caption_clip(vr, frame_range, prompt, model, tokenizer, generation_config, select_frames=12):
-    """Uniformly sample `select_frames` frames inside `frame_range` and caption that clip."""
+def caption_clip(vr, frame_range, prompt, model, tokenizer, generation_config,
+                 select_frames=12, frame_score=None):
+    """Caption a clip in `frame_range`. If `frame_score` (per-frame anomaly map) is
+    given, pick frames by greedy NMS on `frame_score[start:end]`; otherwise fall
+    back to uniform sampling."""
     start_f, end_f = int(frame_range[0]), int(frame_range[1])
     end_f = min(end_f, len(vr))
     start_f = max(0, min(start_f, end_f - 1))
-    fps = float(vr.get_avg_fps())
-    bound = (start_f / fps, end_f / fps)
-    frame_indices = get_index(bound, fps, max_frame=end_f - 1, first_idx=start_f, num_segments=select_frames)
-    frame_indices = list(map(int, frame_indices))
+    if frame_score is not None:
+        from holmesvau.clip_selection import pick_frames
+        clip_score = np.asarray(frame_score)[start_f:end_f]
+        frame_indices = pick_frames(clip_score, num_picks=select_frames, offset=start_f)
+    else:
+        fps = float(vr.get_avg_fps())
+        bound = (start_f / fps, end_f / fps)
+        frame_indices = get_index(bound, fps, max_frame=end_f - 1, first_idx=start_f, num_segments=select_frames)
+        frame_indices = list(map(int, frame_indices))
     pixel_values, num_patches_list = get_pixel_values(vr, frame_indices)
     pixel_values = pixel_values.to(torch.bfloat16).to(model.device)
     video_prefix = ''.join([f'Frame{i+1}: <image>\n' for i in range(len(num_patches_list))])
