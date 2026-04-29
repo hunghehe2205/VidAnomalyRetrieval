@@ -29,11 +29,13 @@ class Temporal_Sampler():
             for b, data in enumerate(pixel_values_batched):
                 data = data.to(self.device)
                 vit_embeds = model.vision_model(pixel_values=data, output_hidden_states=False, return_dict=True).last_hidden_state
-                cls_token = vit_embeds[:, 0, :] #.cpu().detach()
+                # Clone-detach onto CPU so GPU can free `vit_embeds` (the slice would
+                # otherwise keep the whole last_hidden_state alive — fatal on long videos).
+                cls_token = vit_embeds[:, 0, :].detach().to("cpu")
                 cls_tokens.append(cls_token)
+                del vit_embeds, data
                 print("Extracted {}/{}".format(b, len(pixel_values_batched)), end='\r')
-            vid_feats = torch.cat(cls_tokens, dim=0).to(torch.float32).unsqueeze(0)
-            # print(pixel_values.shape, vid_feats.shape)
+            vid_feats = torch.cat(cls_tokens, dim=0).to(torch.float32).unsqueeze(0).to(self.device)
             anomaly_scores = self.anomaly_scorer(vid_feats)['anomaly_scores']
             anomaly_scores = anomaly_scores[0].detach().cpu().numpy()
         return anomaly_scores
