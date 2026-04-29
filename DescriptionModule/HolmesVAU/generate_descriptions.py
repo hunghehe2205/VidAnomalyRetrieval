@@ -127,13 +127,29 @@ def run_split(split, args, model, tokenizer, generation_config, sampler):
     os.makedirs(args.out_dir, exist_ok=True)
 
     rel_paths = read_split(list_file)
+    if args.only:
+        only_set = {p.strip() for p in args.only.split(",") if p.strip()}
+        rel_paths = [p for p in rel_paths if p in only_set]
+        missing = only_set - set(rel_paths)
+        if missing:
+            print(f"[{split}] WARNING: {len(missing)} requested videos not in split:")
+            for m in sorted(missing):
+                print(f"  - {m}")
     if args.limit:
         rel_paths = rel_paths[: args.limit]
 
     results = load_results(out_path)
+    if args.force and rel_paths:
+        # Drop existing records for the targeted videos so they get rewritten.
+        target = set(rel_paths)
+        before = len(results)
+        results = [r for r in results if r.get("video") not in target]
+        if before != len(results):
+            print(f"[{split}] --force: removed {before - len(results)} existing records to retry")
+            save_results(out_path, results)
     done = {r["video"] for r in results if "video" in r}
     todo = [p for p in rel_paths if p not in done]
-    print(f"[{split}] {len(rel_paths)} total, {len(done)} done, {len(todo)} to process")
+    print(f"[{split}] {len(rel_paths)} requested, {len(done)} already done, {len(todo)} to process")
 
     rng = random.Random(args.seed)
 
@@ -166,6 +182,10 @@ def main():
     ap.add_argument("--select_frames", type=int, default=12)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--limit", type=int, default=0, help="debug: cap videos per split (0 = no cap)")
+    ap.add_argument("--only", type=str, default="",
+                    help="comma-separated rel paths to process exclusively (e.g. for OOM retries)")
+    ap.add_argument("--force", action="store_true",
+                    help="reprocess listed videos even if already in the JSON (overwrites old record)")
     ap.add_argument("--ats_batch_size", type=int, default=8,
                     help="ViT forward batch in the ATS dense pre-pass. Lower for tight VRAM.")
     args = ap.parse_args()

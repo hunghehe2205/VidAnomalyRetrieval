@@ -18,6 +18,8 @@ K=${K:-3}
 CLIP_SEC=${CLIP_SEC:-16}
 SEED=${SEED:-0}
 LIMIT=${LIMIT:-0}               # 0 = no cap, useful for debugging
+ONLY=${ONLY:-}                  # comma-separated rel paths to process only (OOM retries)
+FORCE_RETRY=${FORCE_RETRY:-0}   # 1 = overwrite existing records for ONLY videos
 
 VIDEO_ROOT=${VIDEO_ROOT:-/workspace/VidAnomalyRetrieval/UCF_Video}
 LIST_DIR=${LIST_DIR:-/workspace/VidAnomalyRetrieval/DescriptionModule/VadCLIP/list}
@@ -53,6 +55,10 @@ fi
 echo "[run_descriptions] split=$SPLIT  ATS_BATCH=$ATS_BATCH  K=$K  clip_sec=$CLIP_SEC"
 echo "[run_descriptions] out_dir=$OUT_DIR"
 
+EXTRA_ARGS=()
+[[ -n "$ONLY" ]] && EXTRA_ARGS+=(--only "$ONLY")
+[[ "$FORCE_RETRY" == "1" ]] && EXTRA_ARGS+=(--force)
+
 python generate_descriptions.py \
     --split "$SPLIT" \
     --video_root "$VIDEO_ROOT" \
@@ -65,4 +71,5 @@ python generate_descriptions.py \
     --select_frames "$SELECT_FRAMES" \
     --ats_batch_size "$ATS_BATCH" \
     --seed "$SEED" \
-    --limit "$LIMIT"
+    --limit "$LIMIT" \
+    "${EXTRA_ARGS[@]}"
