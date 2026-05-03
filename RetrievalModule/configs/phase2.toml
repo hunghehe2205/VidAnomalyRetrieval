@@ -10,7 +10,7 @@ train_file = "data/T2V_VAR/ucf_crime_train_dedup.json"
 eval_file = "data/T2V_VAR/ucf_crime_test.json"
 query_column = "English Text"
 video_column = "Video Name"
-server_prefix = "/workspace/VidAnomalyRetrieval/UCF-Crime"
+server_prefix = "/workspace/VidAnomalyRetrieval/UCF_Video"
 fps = 1
 max_frames = 32
 
