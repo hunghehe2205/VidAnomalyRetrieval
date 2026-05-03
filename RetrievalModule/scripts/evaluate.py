@@ -32,7 +32,26 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="Retrieve videos relevant to the user's query.",
     )
+    p.add_argument("--dump-topk", type=int, default=0,
+                   help="Dump top-K candidates per query (both directions). 0 = off.")
+    p.add_argument("--topk-out", type=Path, default=None,
+                   help="Output path for top-K JSON (default: outputs/topk_<mode>.json).")
     return p.parse_args()
+
+
+def _topk_per_query(scores: np.ndarray, positives, query_labels, candidate_labels, k: int) -> dict:
+    k = min(k, scores.shape[1])
+    order = np.argsort(-scores, axis=1)[:, :k]
+    items = []
+    for i in range(len(query_labels)):
+        idxs = order[i]
+        items.append({
+            "query": query_labels[i],
+            "positives": [candidate_labels[int(p)] for p in positives[i]],
+            "topk": [candidate_labels[int(j)] for j in idxs],
+            "topk_scores": [float(scores[i, int(j)]) for j in idxs],
+        })
+    return {"k": k, "items": items}
 
 
 def _encode(engine, items: Sequence[dict], batch_size: int, label: str) -> np.ndarray:
@@ -116,6 +135,23 @@ def _run(args: argparse.Namespace) -> Path:
     log("eval", f"t2v {t2v_metrics}")
     log("eval", f"v2t {v2t_metrics}")
     log("eval", f"saved: {out_path}")
+
+    if args.dump_topk > 0:
+        k = args.dump_topk
+        topk_payload = {
+            "mode": mode,
+            "k": k,
+            "t2v": _topk_per_query(t2v_scores, t2v_pos, t2v_queries, t2v_videos, k),
+            "v2t": _topk_per_query(v2t_scores, v2t_pos, v2t_videos, v2t_queries, k),
+        }
+        topk_path = args.topk_out
+        if topk_path is None:
+            stem = "topk_baseline" if args.zero_shot else "topk_metrics"
+            topk_path = REPO_ROOT / "outputs" / f"{stem}.json"
+        topk_path.parent.mkdir(parents=True, exist_ok=True)
+        topk_path.write_text(json.dumps(topk_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        log("eval", f"topk: K={k}  saved: {topk_path}")
+
     return out_path
 
 
