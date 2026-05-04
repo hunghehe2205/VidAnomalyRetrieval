@@ -151,31 +151,59 @@ class RerankTrainDataset(Dataset):
 
 
 # --------------------------------------------------------------------------- #
-# Reranker training-mode forward (raw logit, with grad)
+# Reranker training-mode forward (raw logits, with grad). Batched within a query.
 # --------------------------------------------------------------------------- #
 
-def score_pair_logit(
+def _forward_chunk(reranker: Qwen3VLReranker, chunk: List[dict]) -> torch.Tensor:
+    inputs = reranker.tokenize(chunk)
+    inputs = {k: (v.to(reranker.model.device) if torch.is_tensor(v) else v)
+              for k, v in inputs.items()}
+    # padding_side='left' on the processor → last_hidden_state[:, -1] is the score token for every row.
+    h = reranker.model(**inputs).last_hidden_state[:, -1]
+    return reranker.score_linear(h).squeeze(-1)  # (B,)
+
+
+def score_group_logits(
     reranker: Qwen3VLReranker,
     query_text: str,
-    doc: dict,
+    docs: List[dict],
     instruction: str,
     fps: float,
     max_frames: int,
+    micro_batch: int,
 ) -> torch.Tensor:
-    pair = reranker.format_mm_instruction(
-        query_text=query_text,
-        doc_text=doc.get("text"),
-        doc_video=doc.get("video"),
-        instruction=instruction,
-        fps=fps,
-        max_frames=max_frames,
-    )
-    inputs = reranker.tokenize([pair])
-    inputs = {k: (v.to(reranker.model.device) if torch.is_tensor(v) else v)
-              for k, v in inputs.items()}
-    h = reranker.model(**inputs).last_hidden_state[:, -1]
-    logit = reranker.score_linear(h).squeeze(-1)  # shape (1,)
-    return logit
+    """Score N (query, doc) pairs in micro-batches; returns logits shape (N,).
+
+    On a batch failure (e.g. corrupted video in the chunk), falls back to per-pair
+    forwards within just that chunk so a single bad sample doesn't kill the query.
+    """
+    pairs = [
+        reranker.format_mm_instruction(
+            query_text=query_text,
+            doc_text=d.get("text"),
+            doc_video=d.get("video"),
+            instruction=instruction,
+            fps=fps,
+            max_frames=max_frames,
+        )
+        for d in docs
+    ]
+    out: List[torch.Tensor] = []
+    mb = max(1, int(micro_batch))
+    for i in range(0, len(pairs), mb):
+        chunk = pairs[i:i + mb]
+        try:
+            out.append(_forward_chunk(reranker, chunk))
+        except Exception as e:
+            print(f"[score] batch fail (size={len(chunk)}): {e}; falling back to per-pair", flush=True)
+            for j, p in enumerate(chunk):
+                try:
+                    out.append(_forward_chunk(reranker, [p]))
+                except Exception as e2:
+                    print(f"[score] pair fail at chunk[{j}]: {e2}", flush=True)
+                    out.append(torch.tensor([-1e4], device=reranker.model.device,
+                                            dtype=reranker.model.dtype))
+    return torch.cat(out)  # (N,)
 
 
 def build_doc(video_rel: str, video_root: Path, descs: Dict[str, str]) -> dict:
@@ -249,16 +277,11 @@ def _score_candidates(
     instruction: str,
     fps: float,
     max_frames: int,
+    micro_batch: int = 1,
 ) -> List[tuple]:
-    scored = []
-    for v in candidates:
-        doc = build_doc(v, video_root, descs)
-        try:
-            logit = score_pair_logit(reranker, query, doc, instruction, fps, max_frames)
-            scored.append((float(logit.item()), v))
-        except Exception as e:
-            print(f"[score] WARN forward fail on {v}: {e}", flush=True)
-            scored.append((float("-inf"), v))
+    docs = [build_doc(v, video_root, descs) for v in candidates]
+    logits = score_group_logits(reranker, query, docs, instruction, fps, max_frames, micro_batch)
+    scored = [(float(logits[i].item()), candidates[i]) for i in range(len(candidates))]
     scored.sort(key=lambda x: x[0], reverse=True)
     return scored
 
@@ -272,6 +295,7 @@ def evaluate_test_subset(
     fps: float,
     max_frames: int,
     top_k: int = 30,
+    micro_batch: int = 1,
 ) -> Dict[str, float]:
     was_training = reranker.model.training
     reranker.model.eval()
@@ -280,7 +304,8 @@ def evaluate_test_subset(
         positives = set(it.get("positives") or [])
         candidates = it["topk"][:top_k]
         scored = _score_candidates(reranker, it["query"], candidates, descs,
-                                   video_root, instruction, fps, max_frames)
+                                   video_root, instruction, fps, max_frames,
+                                   micro_batch=micro_batch)
         ranked = [v for _, v in scored]
         if ranked and ranked[0] in positives:
             hits1 += 1
@@ -301,6 +326,7 @@ def remine_hard_negatives(
     fps: float,
     max_frames: int,
     top_k: int = 30,
+    micro_batch: int = 1,
 ) -> None:
     was_training = reranker.model.training
     reranker.model.eval()
@@ -309,7 +335,8 @@ def remine_hard_negatives(
     for i, item in enumerate(train_ds.items):
         candidates = item["topk"][:top_k]
         scored = _score_candidates(reranker, item["query"], candidates, descs,
-                                   video_root, instruction, fps, max_frames)
+                                   video_root, instruction, fps, max_frames,
+                                   micro_batch=micro_batch)
         new_head = [v for _, v in scored]
         tail = item["topk"][top_k:]  # preserve untouched ranks beyond top_k
         item["topk"] = new_head + tail
@@ -448,6 +475,7 @@ def main() -> None:
     tau = float(train_cfg.get("logit_temperature", 1.0))
     hard_refresh_iters = int(train_cfg.get("hard_neg_refresh_steps", 0))
     hard_refresh_topk = int(train_cfg.get("hard_neg_refresh_topk", 30))
+    micro_batch = int(train_cfg.get("micro_batch_size", 1))
 
     # ---- Eval data (for eval-in-loop) ----
     eval_items: List[dict] = []
@@ -464,7 +492,8 @@ def main() -> None:
 
     print(f"[train] logit_temperature={tau}  "
           f"hard_neg_refresh_steps={hard_refresh_iters}  "
-          f"hard_neg_refresh_topk={hard_refresh_topk}")
+          f"hard_neg_refresh_topk={hard_refresh_topk}  "
+          f"micro_batch_size={micro_batch}")
     if wb_run is not None:
         wb_run.config.update({
             "logit_temperature": tau,
@@ -498,6 +527,7 @@ def main() -> None:
                 remine_hard_negatives(
                     reranker, train_ds, descs_train, video_root,
                     instruction, fps, max_frames, top_k=hard_refresh_topk,
+                    micro_batch=micro_batch,
                 )
                 refreshed = True
                 if wb_run is not None:
@@ -509,16 +539,11 @@ def main() -> None:
             query = item["query"]
 
             q_t0 = time.time()
-            logits = []
-            for v in videos:
-                doc = build_doc(v, video_root, descs_train)
-                try:
-                    logit = score_pair_logit(reranker, query, doc, instruction, fps, max_frames)
-                except Exception as e:
-                    print(f"[train] WARN forward fail on {v}: {e}", flush=True)
-                    logit = torch.tensor([-1e4], device=reranker.model.device, dtype=torch.bfloat16)
-                logits.append(logit)
-            logits_t = torch.cat(logits).float().unsqueeze(0) / tau  # (1, group_size), temperature-scaled
+            docs = [build_doc(v, video_root, descs_train) for v in videos]
+            group_logits = score_group_logits(
+                reranker, query, docs, instruction, fps, max_frames, micro_batch,
+            )
+            logits_t = group_logits.float().unsqueeze(0) / tau  # (1, group_size), temperature-scaled
             label_t = torch.tensor([label], device=logits_t.device)
             loss_full = F.cross_entropy(logits_t, label_t)
             loss = loss_full / grad_accum
@@ -576,6 +601,7 @@ def main() -> None:
                     metrics = evaluate_test_subset(
                         reranker, eval_items, descs_eval, video_root,
                         instruction, fps, max_frames, top_k=hard_refresh_topk,
+                        micro_batch=micro_batch,
                     )
                     eval_elapsed = (time.time() - eval_t) / 60
                     print(f"[eval] step={global_step} R@1={metrics['r1']:.4f} "
@@ -605,6 +631,7 @@ def main() -> None:
         metrics = evaluate_test_subset(
             reranker, eval_items, descs_eval, video_root,
             instruction, fps, max_frames, top_k=hard_refresh_topk,
+            micro_batch=micro_batch,
         )
         print(f"[eval] FINAL R@1={metrics['r1']:.4f} R@5={metrics['r5']:.4f} "
               f"n={metrics['n']}  best_R@1={best_r1:.4f}", flush=True)

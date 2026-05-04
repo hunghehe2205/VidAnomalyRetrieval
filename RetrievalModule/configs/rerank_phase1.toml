@@ -34,8 +34,9 @@ gradient_accumulation   = 4
 gradient_checkpointing  = true
 max_grad_norm           = 1.0
 logit_temperature       = 2.0
-hard_neg_refresh_steps  = 800
+hard_neg_refresh_steps  = 0           # disabled: re-mining was the dominant cost; static negs first
 hard_neg_refresh_topk   = 30
+micro_batch_size        = 4           # candidates per forward pass within a query (group_size=8 → 2 micro-batches)
 logging_steps           = 10
 progress_every_queries  = 5
 save_steps              = 100
