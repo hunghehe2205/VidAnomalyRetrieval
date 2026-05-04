@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--video-root", type=Path, required=True,
                    help="Root for UCF mp4s; joined with relative video name.")
     p.add_argument("--reranker-model", default="Qwen/Qwen3-VL-Reranker-2B")
+    p.add_argument("--adapter", type=Path, default=None,
+                   help="Optional LoRA adapter path (from train_reranker.py).")
     p.add_argument("--mode", choices=["text", "video", "multimodal"], default="multimodal")
     p.add_argument("--instruction", default=DEFAULT_INSTRUCTION)
     p.add_argument("--max-frames", type=int, default=32)
@@ -133,6 +135,14 @@ def main() -> None:
         torch_dtype=torch.bfloat16,
         attn_implementation=args.attn_impl,
     )
+    if args.adapter is not None:
+        from peft import PeftModel
+        adapter_path = args.adapter if args.adapter.is_absolute() else (
+            Path(__file__).resolve().parent.parent / args.adapter
+        )
+        print(f"[rerank] loading LoRA adapter: {adapter_path}")
+        reranker.model = PeftModel.from_pretrained(reranker.model, str(adapter_path), is_trainable=False)
+        reranker.model.eval()
     print(f"[rerank] device: {reranker.device}")
 
     out_items: List[Dict] = []

@@ -1,0 +1,58 @@
+phase = "rerank-phase1"
+seed = 42
+
+[model]
+model_name_or_path = "/workspace/VidAnomalyRetrieval/RetrievalModule/models/Qwen3-VL-Reranker-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file       = "data/T2V_VAR/ucf_crime_train_dedup.json"
+topk_train_file  = "outputs/topk_baseline_train.json"
+descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/GeneratedDescription/descriptions_train.json"
+eval_topk_file   = "outputs/topk_baseline.json"
+eval_descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/GeneratedDescription/descriptions_test.json"
+video_root       = "/workspace/VidAnomalyRetrieval/UCF_Video"
+instruction      = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
+
+[training]
+output_dir              = "outputs/rerank-phase1"
+num_hard                = 5
+num_medium              = 2
+hard_rank_lo            = 2
+hard_rank_hi            = 15
+medium_rank_lo          = 16
+medium_rank_hi          = 30
+max_frames              = 32
+fps                     = 1.0
+max_length              = 10240
+num_epochs              = 1
+learning_rate           = 1.0e-4
+weight_decay            = 0.01
+warmup_ratio            = 0.1
+lr_scheduler            = "cosine"
+gradient_accumulation   = 4
+gradient_checkpointing  = true
+max_grad_norm           = 1.0
+logging_steps           = 10
+save_steps              = 100
+eval_steps              = 200
+eval_on_test_subset     = 50
+bf16                    = true
+
+[wandb]
+enable     = true
+project    = "Finetune-VAR-Qwen3VL-Reranker"
+run_name   = "rerank-phase1-lr1e4-grp8"
+log_every  = 10
+
+[hub]
+push_to_hub = false
+model_id    = "hungnghehe/qwen3-vl-reranker-2b-ucf-rerank-phase1"
+private     = true
+
+[lora]
+r              = 32
+lora_alpha     = 32
+lora_dropout   = 0.05
+bias           = "none"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
