@@ -15,7 +15,7 @@ video_root       = "/workspace/VidAnomalyRetrieval/UCF_Video"
 instruction      = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
 
 [training]
-output_dir              = "outputs/rerank-phase1"
+output_dir              = "outputs/rerank-phase1-v2"
 num_hard                = 5
 num_medium              = 2
 hard_rank_lo            = 2
@@ -26,8 +26,8 @@ max_frames              = 32
 fps                     = 1.0
 max_length              = 10240
 num_epochs              = 2
-learning_rate           = 1.0e-4
-weight_decay            = 0.01
+learning_rate           = 5.0e-5      # was 1e-4; halved after ckpt-100 collapse (loss→0 by step 200, test R@1=1%)
+weight_decay            = 0.05        # was 0.01; stronger to fight overfit
 warmup_ratio            = 0.1
 lr_scheduler            = "cosine"
 gradient_accumulation   = 4
@@ -35,19 +35,20 @@ gradient_checkpointing  = true
 max_grad_norm           = 1.0
 logit_temperature       = 2.0
 hard_neg_refresh_steps  = 0           # disabled: re-mining was the dominant cost; static negs first
-hard_neg_refresh_topk   = 30
+hard_neg_refresh_topk   = 20          # was 30; smaller eval top_k cuts per-eval cost
 micro_batch_size        = 4           # candidates per forward pass within a query (group_size=8 → 2 micro-batches)
+caption_dropout_p       = 0.5         # per-query coin flip; if true, drop captions for ALL docs in group (force visual learning, prevents caption shortcut)
 logging_steps           = 10
 progress_every_queries  = 5
-save_steps              = 100
-eval_steps              = 200
-eval_on_test_subset     = 50
+save_steps              = 25          # was 100; catch pre-collapse checkpoints
+eval_steps              = 25          # was 200; matched to save_steps so each saved adapter has eval data
+eval_on_test_subset     = 20          # was 50; smaller subset → eval ~5-7 min
 bf16                    = true
 
 [wandb]
 enable     = true
 project    = "Finetune-VAR-Qwen3VL-Reranker"
-run_name   = "rerank-phase1-lr1e4-grp8"
+run_name   = "rerank-phase1-lr5e5-capdrop05-grp8"
 log_every  = 10
 
 [hub]
@@ -58,6 +59,6 @@ private     = true
 [lora]
 r              = 32
 lora_alpha     = 32
-lora_dropout   = 0.05
+lora_dropout   = 0.1                  # was 0.05; doubled to fight overfit (prev ckpt loss→0 by step 200)
 bias           = "none"
 target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]

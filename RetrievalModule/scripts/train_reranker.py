@@ -207,10 +207,14 @@ def score_group_logits(
 
 
 def build_doc(video_rel: str, video_root: Path, descs: Dict[str, str]) -> dict:
-    return {
-        "text": descs.get(video_rel, ""),
-        "video": str(video_root / video_rel),
-    }
+    """Build doc dict for reranker. Omits 'text' key if caption is empty so that
+    the chat template renders pure-video docs (no empty `<Document>: ` line).
+    """
+    cap = descs.get(video_rel, "")
+    doc: Dict = {"video": str(video_root / video_rel)}
+    if cap:
+        doc["text"] = cap
+    return doc
 
 
 # --------------------------------------------------------------------------- #
@@ -476,6 +480,8 @@ def main() -> None:
     hard_refresh_iters = int(train_cfg.get("hard_neg_refresh_steps", 0))
     hard_refresh_topk = int(train_cfg.get("hard_neg_refresh_topk", 30))
     micro_batch = int(train_cfg.get("micro_batch_size", 1))
+    caption_dropout_p = float(train_cfg.get("caption_dropout_p", 0.0))
+    cap_drop_rng = random.Random(seed + 1)  # independent stream from data sampler
 
     # ---- Eval data (for eval-in-loop) ----
     eval_items: List[dict] = []
@@ -493,12 +499,14 @@ def main() -> None:
     print(f"[train] logit_temperature={tau}  "
           f"hard_neg_refresh_steps={hard_refresh_iters}  "
           f"hard_neg_refresh_topk={hard_refresh_topk}  "
-          f"micro_batch_size={micro_batch}")
+          f"micro_batch_size={micro_batch}  "
+          f"caption_dropout_p={caption_dropout_p}")
     if wb_run is not None:
         wb_run.config.update({
             "logit_temperature": tau,
             "hard_neg_refresh_steps": hard_refresh_iters,
             "hard_neg_refresh_topk": hard_refresh_topk,
+            "caption_dropout_p": caption_dropout_p,
         }, allow_val_change=True)
 
     # ---- Train loop ----
@@ -511,6 +519,7 @@ def main() -> None:
     running_loss = 0.0
     running_correct = 0
     running_count = 0
+    running_capdrop = 0
 
     for epoch in range(num_epochs):
         # Per-epoch shuffle of query order.
@@ -539,7 +548,11 @@ def main() -> None:
             query = item["query"]
 
             q_t0 = time.time()
-            docs = [build_doc(v, video_root, descs_train) for v in videos]
+            drop_caps = (caption_dropout_p > 0.0
+                         and cap_drop_rng.random() < caption_dropout_p)
+            descs_for_query = {} if drop_caps else descs_train
+            running_capdrop += int(drop_caps)
+            docs = [build_doc(v, video_root, descs_for_query) for v in videos]
             group_logits = score_group_logits(
                 reranker, query, docs, instruction, fps, max_frames, micro_batch,
             )
@@ -581,16 +594,19 @@ def main() -> None:
                     elapsed = time.time() - t0
                     avg_loss = running_loss / max(1, running_count)
                     acc = running_correct / max(1, running_count)
+                    cap_drop_rate = running_capdrop / max(1, running_count)
                     lr = optim.param_groups[0]["lr"]
                     eta = elapsed / global_step * (total_steps - global_step)
                     print(f"[train] epoch={epoch+1} step={global_step}/{total_steps} "
                           f"loss={avg_loss:.4f} group_acc={acc:.3f} lr={lr:.2e} "
+                          f"cap_drop={cap_drop_rate:.2f} "
                           f"elapsed={elapsed/60:.1f}m ETA={eta/60:.1f}m", flush=True)
                     if wb_run is not None:
                         wb_run.log({
                             "train/loss": avg_loss,
                             "train/group_acc": acc,
                             "train/lr": lr,
+                            "train/cap_drop_rate": cap_drop_rate,
                             "train/epoch": epoch + (q_i / n_queries),
                             "train/elapsed_min": elapsed / 60,
                             "train/global_step": global_step,
@@ -598,6 +614,7 @@ def main() -> None:
                     running_loss = 0.0
                     running_correct = 0
                     running_count = 0
+                    running_capdrop = 0
 
                 if global_step % save_every == 0:
                     ck_dir = output_dir / f"checkpoint-{global_step}"
