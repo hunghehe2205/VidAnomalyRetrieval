@@ -531,7 +531,7 @@ def main() -> None:
                 )
                 refreshed = True
                 if wb_run is not None:
-                    wb_run.log({"train/remined_at_iter": q_i_total}, step=global_step)
+                    wb_run.log({"train/remined_at_iter": q_i_total}, step=q_i_total)
 
             item = train_ds[idx]
             videos = item["videos"]
@@ -555,6 +555,13 @@ def main() -> None:
                 print(f"[train] e{epoch+1} q={q_i}/{n_queries} step={global_step}/{total_steps} "
                       f"loss={loss_full.item():.4f} hit={int(pred_q == label)} ({q_dt:.1f}s/q)",
                       flush=True)
+                if wb_run is not None:
+                    wb_run.log({
+                        "train/loss_query": loss_full.item(),
+                        "train/hit_query": int(pred_q == label),
+                        "train/q_dt_sec": q_dt,
+                        "train/global_step": global_step,
+                    }, step=q_i_total)
 
             running_loss += loss.item() * grad_accum
             with torch.no_grad():
@@ -586,7 +593,8 @@ def main() -> None:
                             "train/lr": lr,
                             "train/epoch": epoch + (q_i / n_queries),
                             "train/elapsed_min": elapsed / 60,
-                        }, step=global_step)
+                            "train/global_step": global_step,
+                        }, step=q_i_total)
                     running_loss = 0.0
                     running_correct = 0
                     running_count = 0
@@ -612,7 +620,8 @@ def main() -> None:
                             "val/R@1": metrics["r1"],
                             "val/R@5": metrics["r5"],
                             "val/eval_minutes": eval_elapsed,
-                        }, step=global_step)
+                            "val/global_step": global_step,
+                        }, step=q_i_total)
                     if metrics["r1"] > best_r1:
                         best_r1 = metrics["r1"]
                         best_dir = output_dir / "best_adapter"
@@ -640,7 +649,8 @@ def main() -> None:
                 "val/R@1_final": metrics["r1"],
                 "val/R@5_final": metrics["r5"],
                 "val/best_R@1": best_r1,
-            }, step=global_step)
+                "val/global_step": global_step,
+            }, step=q_i_total)
         if metrics["r1"] > best_r1:
             best_r1 = metrics["r1"]
             best_dir = output_dir / "best_adapter"
