@@ -32,8 +32,9 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "Qwen3-VL-Embedding"))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from src.models.qwen3_vl_reranker import Qwen3VLReranker  # noqa: E402
+from var.cached_reranker import CachedQwen3VLReranker  # noqa: E402
 
 
 DEFAULT_INSTRUCTION = (
@@ -127,7 +128,7 @@ def main() -> None:
     print(f"[rerank] loaded {len(descs)} video descriptions from {args.descriptions.name}")
 
     print(f"[rerank] loading {args.reranker_model} ...")
-    reranker = Qwen3VLReranker(
+    reranker = CachedQwen3VLReranker(
         model_name_or_path=args.reranker_model,
         max_length=args.max_length,
         max_frames=args.max_frames,
@@ -172,7 +173,11 @@ def main() -> None:
         if i % 5 == 0 or i == len(items):
             elapsed = time.time() - t0
             eta = elapsed / i * (len(items) - i)
-            print(f"[rerank] {i}/{len(items)}  elapsed={elapsed/60:.1f}m  ETA={eta/60:.1f}m")
+            stats = reranker.cache_stats() if hasattr(reranker, "cache_stats") else None
+            cache_str = (f"  cache(size={stats['size']}, hits={stats['hits']}, "
+                         f"miss={stats['misses']})") if stats else ""
+            print(f"[rerank] {i}/{len(items)}  elapsed={elapsed/60:.1f}m  "
+                  f"ETA={eta/60:.1f}m{cache_str}")
 
     pre = compute_metrics(items, topk_field="topk")
     post = compute_metrics(out_items, topk_field="topk")
