@@ -61,6 +61,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-length", type=int, default=10240)
     p.add_argument("--limit", type=int, default=0,
                    help="Cap number of queries (smoke test). 0 = all.")
+    p.add_argument("--top-k", type=int, default=0,
+                   help="Cap candidates per query (0 = use all from dump).")
+    p.add_argument("--micro-batch", type=int, default=4,
+                   help="GPU micro-batch within a query (1 = original per-pair).")
     p.add_argument("--out", type=Path, default=None,
                    help="Output JSON (default: outputs/topk_reranked_<mode>.json).")
     p.add_argument("--metrics-out", type=Path, default=None)
@@ -87,6 +91,63 @@ def build_doc(video_rel: str, video_root: Path, descs: Dict[str, str], mode: str
     if mode in ("video", "multimodal"):
         doc["video"] = str(video_root / video_rel)
     return doc
+
+
+@torch.inference_mode()
+def score_pairs_batched(
+    reranker,
+    query: str,
+    docs: List[Dict],
+    instruction: str,
+    fps: float,
+    max_frames: int,
+    micro_batch: int,
+) -> List[float]:
+    """Score (query, doc) pairs in micro-batches; returns sigmoid scores in input order.
+
+    On chunk failure (OOM, corrupted video), clears cache and falls back to per-pair.
+    """
+    pairs = [
+        reranker.format_mm_instruction(
+            query_text=query,
+            doc_text=d.get("text"),
+            doc_video=d.get("video"),
+            instruction=instruction,
+            fps=fps,
+            max_frames=max_frames,
+        )
+        for d in docs
+    ]
+    out: List[float] = []
+    mb = max(1, int(micro_batch))
+    for i in range(0, len(pairs), mb):
+        chunk = pairs[i:i + mb]
+        try:
+            inputs = reranker.tokenize(chunk)
+            inputs = {k: (v.to(reranker.device) if torch.is_tensor(v) else v)
+                      for k, v in inputs.items()}
+            h = reranker.model(**inputs).last_hidden_state[:, -1]
+            s = reranker.score_linear(h)
+            s = torch.sigmoid(s).squeeze(-1).cpu().tolist()
+            if not isinstance(s, list):
+                s = [s]
+            out.extend(float(x) for x in s)
+        except Exception as e:
+            print(f"[rerank] chunk fail (size={len(chunk)}): {e}; per-pair fallback",
+                  flush=True)
+            torch.cuda.empty_cache()
+            for p in chunk:
+                try:
+                    inp = reranker.tokenize([p])
+                    inp = {k: (v.to(reranker.device) if torch.is_tensor(v) else v)
+                           for k, v in inp.items()}
+                    h = reranker.model(**inp).last_hidden_state[:, -1]
+                    s = reranker.score_linear(h)
+                    out.append(float(torch.sigmoid(s).squeeze(-1).cpu().item()))
+                except Exception as e2:
+                    print(f"[rerank] pair fail: {e2}", flush=True)
+                    out.append(-1e4)
+    return out
 
 
 def compute_metrics(items: List[Dict], topk_field: str = "topk") -> Dict[str, float]:
@@ -117,12 +178,18 @@ def main() -> None:
 
     payload = json.loads(args.topk_in.read_text())
     t2v = payload["t2v"]
-    K = t2v["k"]
+    K_dump = t2v["k"]
+    K = min(args.top_k, K_dump) if args.top_k > 0 else K_dump
     items = t2v["items"]
     if args.limit:
         items = items[: args.limit]
+    if args.top_k > 0 and K < K_dump:
+        for it in items:
+            it["topk"] = it["topk"][:K]
+            it["topk_scores"] = it["topk_scores"][:K]
     n_pairs = sum(len(it["topk"]) for it in items)
-    print(f"[rerank] {len(items)} queries × top-{K} = {n_pairs} pairs to score (mode={args.mode})")
+    print(f"[rerank] {len(items)} queries × top-{K} = {n_pairs} pairs to score "
+          f"(mode={args.mode}, micro_batch={args.micro_batch})")
 
     descs = load_descriptions(args.descriptions)
     print(f"[rerank] loaded {len(descs)} video descriptions from {args.descriptions.name}")
@@ -148,18 +215,20 @@ def main() -> None:
 
     out_items: List[Dict] = []
     t0 = time.time()
+    reranker.model.eval()
     for i, it in enumerate(items, start=1):
         query = it["query"]
         cands = it["topk"]
+        cand_scores_stage1 = it["topk_scores"]
         docs = [build_doc(v, args.video_root, descs, args.mode) for v in cands]
 
-        scores = reranker.process({
-            "query": {"text": query},
-            "documents": docs,
-            "instruction": args.instruction,
-            "fps": args.fps,
-            "max_frames": args.max_frames,
-        })
+        scores = score_pairs_batched(
+            reranker, query, docs,
+            instruction=args.instruction,
+            fps=args.fps,
+            max_frames=args.max_frames,
+            micro_batch=args.micro_batch,
+        )
 
         order = np.argsort(-np.asarray(scores))
         out_items.append({
@@ -167,7 +236,7 @@ def main() -> None:
             "positives": it["positives"],
             "topk": [cands[j] for j in order],
             "topk_scores": [float(scores[j]) for j in order],
-            "stage1_scores": [float(it["topk_scores"][j]) for j in order],
+            "stage1_scores": [float(cand_scores_stage1[j]) for j in order],
         })
 
         if i % 5 == 0 or i == len(items):
