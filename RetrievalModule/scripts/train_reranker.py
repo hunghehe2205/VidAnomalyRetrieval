@@ -226,6 +226,103 @@ def count_trainable(model) -> tuple[int, int]:
     return trainable, total
 
 
+# --------------------------------------------------------------------------- #
+# Eval-in-loop & hard-negative re-mining
+# --------------------------------------------------------------------------- #
+
+def load_eval_items(eval_topk_path: Path, n_subset: int) -> List[dict]:
+    payload = json.loads(eval_topk_path.read_text())
+    items = list(payload["t2v"]["items"])
+    items.sort(key=lambda x: x["query"])  # deterministic subset
+    if n_subset > 0:
+        items = items[:n_subset]
+    return items
+
+
+@torch.no_grad()
+def _score_candidates(
+    reranker: Qwen3VLReranker,
+    query: str,
+    candidates: List[str],
+    descs: Dict[str, str],
+    video_root: Path,
+    instruction: str,
+    fps: float,
+    max_frames: int,
+) -> List[tuple]:
+    scored = []
+    for v in candidates:
+        doc = build_doc(v, video_root, descs)
+        try:
+            logit = score_pair_logit(reranker, query, doc, instruction, fps, max_frames)
+            scored.append((float(logit.item()), v))
+        except Exception as e:
+            print(f"[score] WARN forward fail on {v}: {e}", flush=True)
+            scored.append((float("-inf"), v))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+
+
+def evaluate_test_subset(
+    reranker: Qwen3VLReranker,
+    eval_items: List[dict],
+    descs: Dict[str, str],
+    video_root: Path,
+    instruction: str,
+    fps: float,
+    max_frames: int,
+    top_k: int = 30,
+) -> Dict[str, float]:
+    was_training = reranker.model.training
+    reranker.model.eval()
+    hits1 = hits5 = n = 0
+    for it in eval_items:
+        positives = set(it.get("positives") or [])
+        candidates = it["topk"][:top_k]
+        scored = _score_candidates(reranker, it["query"], candidates, descs,
+                                   video_root, instruction, fps, max_frames)
+        ranked = [v for _, v in scored]
+        if ranked and ranked[0] in positives:
+            hits1 += 1
+        if any(v in positives for v in ranked[:5]):
+            hits5 += 1
+        n += 1
+    if was_training:
+        reranker.model.train()
+    return {"r1": hits1 / max(1, n), "r5": hits5 / max(1, n), "n": n}
+
+
+def remine_hard_negatives(
+    reranker: Qwen3VLReranker,
+    train_ds: "RerankTrainDataset",
+    descs: Dict[str, str],
+    video_root: Path,
+    instruction: str,
+    fps: float,
+    max_frames: int,
+    top_k: int = 30,
+) -> None:
+    was_training = reranker.model.training
+    reranker.model.eval()
+    t0 = time.time()
+    n_total = len(train_ds.items)
+    for i, item in enumerate(train_ds.items):
+        candidates = item["topk"][:top_k]
+        scored = _score_candidates(reranker, item["query"], candidates, descs,
+                                   video_root, instruction, fps, max_frames)
+        new_head = [v for _, v in scored]
+        tail = item["topk"][top_k:]  # preserve untouched ranks beyond top_k
+        item["topk"] = new_head + tail
+        if (i + 1) % 50 == 0 or i + 1 == n_total:
+            elapsed = (time.time() - t0) / 60
+            eta = elapsed / (i + 1) * (n_total - i - 1)
+            print(f"[remine] {i+1}/{n_total} elapsed={elapsed:.1f}m ETA={eta:.1f}m",
+                  flush=True)
+    if was_training:
+        reranker.model.train()
+    print(f"[remine] done in {(time.time()-t0)/60:.1f}m", flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--config", type=Path, default=REPO_ROOT / "configs/rerank_phase1.toml")
@@ -345,10 +442,41 @@ def main() -> None:
     max_grad_norm = float(train_cfg["max_grad_norm"])
     log_every = int(train_cfg["logging_steps"])
     save_every = int(train_cfg["save_steps"])
+    eval_every = int(train_cfg.get("eval_steps", 0))
+    eval_subset = int(train_cfg.get("eval_on_test_subset", 0))
+    tau = float(train_cfg.get("logit_temperature", 1.0))
+    hard_refresh_iters = int(train_cfg.get("hard_neg_refresh_steps", 0))
+    hard_refresh_topk = int(train_cfg.get("hard_neg_refresh_topk", 30))
+
+    # ---- Eval data (for eval-in-loop) ----
+    eval_items: List[dict] = []
+    descs_eval: Dict[str, str] = {}
+    if eval_every > 0 and eval_subset > 0 and "eval_topk_file" in data_cfg:
+        eval_topk_path = _resolve(data_cfg["eval_topk_file"])
+        eval_items = load_eval_items(eval_topk_path, eval_subset)
+        if "eval_descriptions_file" in data_cfg:
+            descs_eval = load_descriptions(_resolve(data_cfg["eval_descriptions_file"]))
+        print(f"[eval-in-loop] {len(eval_items)} test queries from {eval_topk_path.name} "
+              f"(every {eval_every} opt steps)")
+    else:
+        print("[eval-in-loop] disabled")
+
+    print(f"[train] logit_temperature={tau}  "
+          f"hard_neg_refresh_steps={hard_refresh_iters}  "
+          f"hard_neg_refresh_topk={hard_refresh_topk}")
+    if wb_run is not None:
+        wb_run.config.update({
+            "logit_temperature": tau,
+            "hard_neg_refresh_steps": hard_refresh_iters,
+            "hard_neg_refresh_topk": hard_refresh_topk,
+        }, allow_val_change=True)
 
     # ---- Train loop ----
     t0 = time.time()
     global_step = 0
+    q_i_total = 0
+    best_r1 = float("-inf")
+    refreshed = False
     optim.zero_grad()
     running_loss = 0.0
     running_correct = 0
@@ -360,6 +488,20 @@ def main() -> None:
         random.Random(seed + epoch).shuffle(order)
 
         for q_i, idx in enumerate(order, start=1):
+            q_i_total += 1
+
+            # ---- Hard-negative re-mining (fires once when crossing threshold) ----
+            if (not refreshed) and hard_refresh_iters > 0 and q_i_total >= hard_refresh_iters:
+                print(f"[train] re-mining hard negatives at iter {q_i_total} "
+                      f"(top_k={hard_refresh_topk}) ...", flush=True)
+                remine_hard_negatives(
+                    reranker, train_ds, descs_train, video_root,
+                    instruction, fps, max_frames, top_k=hard_refresh_topk,
+                )
+                refreshed = True
+                if wb_run is not None:
+                    wb_run.log({"train/remined_at_iter": q_i_total}, step=global_step)
+
             item = train_ds[idx]
             videos = item["videos"]
             label = item["label"]
@@ -374,7 +516,7 @@ def main() -> None:
                     print(f"[train] WARN forward fail on {v}: {e}", flush=True)
                     logit = torch.tensor([-1e4], device=reranker.model.device, dtype=torch.bfloat16)
                 logits.append(logit)
-            logits_t = torch.cat(logits).float().unsqueeze(0)  # (1, group_size)
+            logits_t = torch.cat(logits).float().unsqueeze(0) / tau  # (1, group_size), temperature-scaled
             label_t = torch.tensor([label], device=logits_t.device)
             loss = F.cross_entropy(logits_t, label_t) / grad_accum
             loss.backward()
@@ -419,11 +561,54 @@ def main() -> None:
                     reranker.model.save_pretrained(str(ck_dir))
                     print(f"[train] saved adapter -> {ck_dir}", flush=True)
 
+                if eval_every > 0 and eval_items and global_step % eval_every == 0:
+                    eval_t = time.time()
+                    metrics = evaluate_test_subset(
+                        reranker, eval_items, descs_eval, video_root,
+                        instruction, fps, max_frames, top_k=hard_refresh_topk,
+                    )
+                    eval_elapsed = (time.time() - eval_t) / 60
+                    print(f"[eval] step={global_step} R@1={metrics['r1']:.4f} "
+                          f"R@5={metrics['r5']:.4f} n={metrics['n']} "
+                          f"({eval_elapsed:.1f}m)", flush=True)
+                    if wb_run is not None:
+                        wb_run.log({
+                            "val/R@1": metrics["r1"],
+                            "val/R@5": metrics["r5"],
+                            "val/eval_minutes": eval_elapsed,
+                        }, step=global_step)
+                    if metrics["r1"] > best_r1:
+                        best_r1 = metrics["r1"]
+                        best_dir = output_dir / "best_adapter"
+                        reranker.model.save_pretrained(str(best_dir))
+                        print(f"[eval] new best R@1={best_r1:.4f} -> {best_dir}",
+                              flush=True)
+
     # Final save.
     final_dir = output_dir / "final_adapter"
     reranker.model.save_pretrained(str(final_dir))
     print(f"[train] DONE. final adapter -> {final_dir}")
     print(f"[train] total wallclock: {(time.time() - t0)/60:.1f}m")
+
+    # Final eval pass on the test subset (always runs if configured).
+    if eval_items:
+        metrics = evaluate_test_subset(
+            reranker, eval_items, descs_eval, video_root,
+            instruction, fps, max_frames, top_k=hard_refresh_topk,
+        )
+        print(f"[eval] FINAL R@1={metrics['r1']:.4f} R@5={metrics['r5']:.4f} "
+              f"n={metrics['n']}  best_R@1={best_r1:.4f}", flush=True)
+        if wb_run is not None:
+            wb_run.log({
+                "val/R@1_final": metrics["r1"],
+                "val/R@5_final": metrics["r5"],
+                "val/best_R@1": best_r1,
+            }, step=global_step)
+        if metrics["r1"] > best_r1:
+            best_r1 = metrics["r1"]
+            best_dir = output_dir / "best_adapter"
+            reranker.model.save_pretrained(str(best_dir))
+            print(f"[eval] final beat best, saved -> {best_dir}", flush=True)
 
     # ---- HuggingFace Hub push ----
     hub_cfg = cfg.get("hub", {})
