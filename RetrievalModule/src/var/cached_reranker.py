@@ -31,7 +31,6 @@ from src.models.qwen3_vl_reranker import Qwen3VLReranker  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-đ
 def _cache_key_for_pair(pair) -> Optional[tuple]:
     """Hashable key for a chat pair's video, or None if not safely cacheable.
 
