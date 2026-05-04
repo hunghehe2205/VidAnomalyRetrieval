@@ -442,6 +442,7 @@ def main() -> None:
     max_grad_norm = float(train_cfg["max_grad_norm"])
     log_every = int(train_cfg["logging_steps"])
     save_every = int(train_cfg["save_steps"])
+    progress_every = int(train_cfg.get("progress_every_queries", 5))
     eval_every = int(train_cfg.get("eval_steps", 0))
     eval_subset = int(train_cfg.get("eval_on_test_subset", 0))
     tau = float(train_cfg.get("logit_temperature", 1.0))
@@ -507,6 +508,7 @@ def main() -> None:
             label = item["label"]
             query = item["query"]
 
+            q_t0 = time.time()
             logits = []
             for v in videos:
                 doc = build_doc(v, video_root, descs_train)
@@ -518,8 +520,16 @@ def main() -> None:
                 logits.append(logit)
             logits_t = torch.cat(logits).float().unsqueeze(0) / tau  # (1, group_size), temperature-scaled
             label_t = torch.tensor([label], device=logits_t.device)
-            loss = F.cross_entropy(logits_t, label_t) / grad_accum
+            loss_full = F.cross_entropy(logits_t, label_t)
+            loss = loss_full / grad_accum
             loss.backward()
+            q_dt = time.time() - q_t0
+            with torch.no_grad():
+                pred_q = int(logits_t.argmax(dim=1).item())
+            if q_i == 1 or q_i % progress_every == 0 or q_i == n_queries:
+                print(f"[train] e{epoch+1} q={q_i}/{n_queries} step={global_step}/{total_steps} "
+                      f"loss={loss_full.item():.4f} hit={int(pred_q == label)} ({q_dt:.1f}s/q)",
+                      flush=True)
 
             running_loss += loss.item() * grad_accum
             with torch.no_grad():

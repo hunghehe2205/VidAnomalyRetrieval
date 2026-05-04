@@ -37,6 +37,7 @@ logit_temperature       = 2.0
 hard_neg_refresh_steps  = 800
 hard_neg_refresh_topk   = 30
 logging_steps           = 10
+progress_every_queries  = 10
 save_steps              = 100
 eval_steps              = 200
 eval_on_test_subset     = 50
