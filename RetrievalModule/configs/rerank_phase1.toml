@@ -35,14 +35,14 @@ gradient_checkpointing  = true
 max_grad_norm           = 1.0
 logit_temperature       = 2.0
 hard_neg_refresh_steps  = 0           # disabled: re-mining was the dominant cost; static negs first
-hard_neg_refresh_topk   = 20          # was 30; smaller eval top_k cuts per-eval cost
+hard_neg_refresh_topk   = 30          # unused while eval-in-loop disabled; kept for re-mining if re-enabled
 micro_batch_size        = 4           # candidates per forward pass within a query (group_size=8 → 2 micro-batches)
 caption_dropout_p       = 0.5         # per-query coin flip; if true, drop captions for ALL docs in group (force visual learning, prevents caption shortcut)
 logging_steps           = 10
 progress_every_queries  = 5
-save_steps              = 25          # was 100; catch pre-collapse checkpoints
-eval_steps              = 25          # was 200; matched to save_steps so each saved adapter has eval data
-eval_on_test_subset     = 20          # was 50; smaller subset → eval ~5-7 min
+save_steps              = 50          # save every 50 opt steps → ~16 checkpoints over a run; eval manually post-train
+eval_steps              = 0           # eval-in-loop DISABLED (Option C). Catch collapse from train/loss + train/group_acc; eval saved adapters with rerank_topk.py post-hoc
+eval_on_test_subset     = 0
 bf16                    = true
 
 [wandb]
