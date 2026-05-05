@@ -206,14 +206,42 @@ def score_group_logits(
     return torch.cat(out)  # (N,)
 
 
-def build_doc(video_rel: str, video_root: Path, descs: Dict[str, str]) -> dict:
+def augment_caption(text: str, drop_p: float, rng: random.Random) -> str:
+    """Random word-drop augmentation. Prevents model memorizing exact caption strings
+    by exposing a different surface form each forward pass.
+
+    Skips short captions (< 8 words) where dropping would damage too much.
+    Returns original if all words happen to be dropped (rare for short text).
+    """
+    if not text or drop_p <= 0:
+        return text
+    words = text.split()
+    if len(words) < 8:
+        return text
+    keep = [w for w in words if rng.random() > drop_p]
+    return " ".join(keep) if keep else text
+
+
+def build_doc(
+    video_rel: str,
+    video_root: Path,
+    descs: Dict[str, str],
+    aug_drop_p: float = 0.0,
+    aug_rng: Optional[random.Random] = None,
+) -> dict:
     """Build doc dict for reranker. Omits 'text' key if caption is empty so that
     the chat template renders pure-video docs (no empty `<Document>: ` line).
+
+    Optional `aug_drop_p` + `aug_rng` apply word-drop augmentation to non-empty
+    captions (training only — eval should pass aug_drop_p=0 to keep deterministic).
     """
     cap = descs.get(video_rel, "")
     doc: Dict = {"video": str(video_root / video_rel)}
     if cap:
-        doc["text"] = cap
+        if aug_drop_p > 0.0 and aug_rng is not None:
+            cap = augment_caption(cap, aug_drop_p, aug_rng)
+        if cap:
+            doc["text"] = cap
     return doc
 
 
@@ -359,6 +387,9 @@ def main() -> None:
     ap.add_argument("--config", type=Path, default=REPO_ROOT / "configs/rerank_phase1.toml")
     ap.add_argument("--limit", type=int, default=0,
                     help="Cap training queries (smoke test). 0 = all.")
+    ap.add_argument("--resume", type=Path, default=None,
+                    help="Resume from checkpoint dir. Loads adapter + trainer_state.pt "
+                         "(optimizer, scheduler, RNG, position).")
     args = ap.parse_args()
 
     cfg = tomllib.loads(args.config.read_text())
@@ -430,8 +461,14 @@ def main() -> None:
         attn_implementation=model_cfg.get("attn_implementation", "eager"),
     )
 
-    print("[train] attaching LoRA ...")
-    reranker.model = attach_lora(reranker.model, lora_cfg)
+    if args.resume is not None:
+        from peft import PeftModel
+        resume_path = args.resume if args.resume.is_absolute() else REPO_ROOT / args.resume
+        print(f"[train] resuming LoRA adapter from: {resume_path}")
+        reranker.model = PeftModel.from_pretrained(reranker.model, str(resume_path), is_trainable=True)
+    else:
+        print("[train] attaching LoRA ...")
+        reranker.model = attach_lora(reranker.model, lora_cfg)
     if train_cfg.get("gradient_checkpointing", False):
         reranker.model.gradient_checkpointing_enable()
         # PEFT models need this for grad ckpt to flow:
@@ -482,7 +519,9 @@ def main() -> None:
     hard_refresh_topk = int(train_cfg.get("hard_neg_refresh_topk", 30))
     micro_batch = int(train_cfg.get("micro_batch_size", 1))
     caption_dropout_p = float(train_cfg.get("caption_dropout_p", 0.0))
+    caption_aug_word_drop_p = float(train_cfg.get("caption_aug_word_drop_p", 0.0))
     cap_drop_rng = random.Random(seed + 1)  # independent stream from data sampler
+    cap_aug_rng = random.Random(seed + 2)   # independent from cap_drop_rng
 
     # ---- Eval data (for eval-in-loop) ----
     eval_items: List[dict] = []
@@ -501,7 +540,8 @@ def main() -> None:
           f"hard_neg_refresh_steps={hard_refresh_iters}  "
           f"hard_neg_refresh_topk={hard_refresh_topk}  "
           f"micro_batch_size={micro_batch}  "
-          f"caption_dropout_p={caption_dropout_p}")
+          f"caption_dropout_p={caption_dropout_p}  "
+          f"caption_aug_word_drop_p={caption_aug_word_drop_p}")
     if wb_run is not None:
         wb_run.config.update({
             "logit_temperature": tau,
@@ -509,6 +549,7 @@ def main() -> None:
             "hard_neg_refresh_steps": hard_refresh_iters,
             "hard_neg_refresh_topk": hard_refresh_topk,
             "caption_dropout_p": caption_dropout_p,
+            "caption_aug_word_drop_p": caption_aug_word_drop_p,
         }, allow_val_change=True)
 
     # ---- Train loop ----
@@ -531,12 +572,49 @@ def main() -> None:
     running_count_cap = 0
     running_count_nocap = 0
 
-    for epoch in range(num_epochs):
+    # Resume state if requested. Adapter weights already loaded above; here we
+    # restore optimizer/scheduler/RNG/counters so the next opt step is identical
+    # to what would have happened without the interruption.
+    start_epoch = 0
+    start_q_in_epoch = 0  # 0-indexed; resume picks up at idx position start_q_in_epoch
+    if args.resume is not None:
+        resume_path = args.resume if args.resume.is_absolute() else REPO_ROOT / args.resume
+        state_path = resume_path / "trainer_state.pt"
+        if state_path.exists():
+            state = torch.load(state_path, map_location="cpu", weights_only=False)
+            optim.load_state_dict(state["optimizer"])
+            sched.load_state_dict(state["scheduler"])
+            global_step = int(state["global_step"])
+            q_i_total = int(state["q_i_total"])
+            start_epoch = int(state["epoch_idx"])
+            start_q_in_epoch = int(state["q_i_in_epoch"])
+            best_r1 = float(state.get("best_r1", best_r1))
+            refreshed = bool(state.get("refreshed", refreshed))
+            train_ds.rng.setstate(state["ds_rng_state"])
+            cap_drop_rng.setstate(state["cap_drop_rng_state"])
+            cap_aug_state = state.get("cap_aug_rng_state")
+            if cap_aug_state is not None:
+                cap_aug_rng.setstate(cap_aug_state)
+            t0 = time.time() - float(state.get("t0_offset", 0.0))
+            print(f"[train] resumed: epoch={start_epoch+1} q_i_in_epoch={start_q_in_epoch} "
+                  f"global_step={global_step} q_i_total={q_i_total}", flush=True)
+        else:
+            print(f"[train] WARN: no trainer_state.pt at {state_path} — starting fresh "
+                  f"with loaded adapter (optimizer/scheduler reset)")
+
+    for epoch in range(start_epoch, num_epochs):
         # Per-epoch shuffle of query order.
         order = list(range(n_queries))
         random.Random(seed + epoch).shuffle(order)
 
-        for q_i, idx in enumerate(order, start=1):
+        # Skip into the middle of epoch on resume (only the first epoch we resume into).
+        epoch_start_offset = start_q_in_epoch if epoch == start_epoch else 0
+        if epoch_start_offset:
+            order_iter = enumerate(order[epoch_start_offset:], start=epoch_start_offset + 1)
+        else:
+            order_iter = enumerate(order, start=1)
+
+        for q_i, idx in order_iter:
             q_i_total += 1
 
             # ---- Hard-negative re-mining (fires once when crossing threshold) ----
@@ -562,7 +640,12 @@ def main() -> None:
                          and cap_drop_rng.random() < caption_dropout_p)
             descs_for_query = {} if drop_caps else descs_train
             running_capdrop += int(drop_caps)
-            docs = [build_doc(v, video_root, descs_for_query) for v in videos]
+            # Apply word-drop augmentation only when captions are kept (no point
+            # augmenting empty descs).
+            aug_p_for_query = 0.0 if drop_caps else caption_aug_word_drop_p
+            docs = [build_doc(v, video_root, descs_for_query,
+                              aug_drop_p=aug_p_for_query, aug_rng=cap_aug_rng)
+                    for v in videos]
             group_logits = score_group_logits(
                 reranker, query, docs, instruction, fps, max_frames, micro_batch,
             )
@@ -664,7 +747,23 @@ def main() -> None:
                 if global_step % save_every == 0:
                     ck_dir = output_dir / f"checkpoint-{global_step}"
                     reranker.model.save_pretrained(str(ck_dir))
-                    print(f"[train] saved adapter -> {ck_dir}", flush=True)
+                    # Trainer state for `--resume`. Includes optimizer/scheduler/RNG/counters
+                    # so resumed training is functionally identical to uninterrupted training.
+                    torch.save({
+                        "global_step": global_step,
+                        "q_i_total": q_i_total,
+                        "epoch_idx": epoch,
+                        "q_i_in_epoch": q_i,
+                        "optimizer": optim.state_dict(),
+                        "scheduler": sched.state_dict(),
+                        "ds_rng_state": train_ds.rng.getstate(),
+                        "cap_drop_rng_state": cap_drop_rng.getstate(),
+                        "cap_aug_rng_state": cap_aug_rng.getstate(),
+                        "best_r1": best_r1,
+                        "refreshed": refreshed,
+                        "t0_offset": time.time() - t0,
+                    }, ck_dir / "trainer_state.pt")
+                    print(f"[train] saved adapter + trainer_state -> {ck_dir}", flush=True)
 
                 if eval_every > 0 and eval_items and global_step % eval_every == 0:
                     eval_t = time.time()
