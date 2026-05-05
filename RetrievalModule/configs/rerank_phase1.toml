@@ -36,7 +36,7 @@ max_grad_norm           = 1.0
 logit_temperature       = 2.0
 hard_neg_refresh_steps  = 0           # disabled: re-mining was the dominant cost; static negs first
 hard_neg_refresh_topk   = 30          # unused while eval-in-loop disabled; kept for re-mining if re-enabled
-micro_batch_size        = 4           # candidates per forward pass within a query (group_size=8 → 2 micro-batches)
+micro_batch_size        = 2           # was 4 (24GB); 2 to fit 16GB VRAM peak (vision tower batch + LM activations)
 caption_dropout_p       = 0.5         # per-query coin flip; if true, drop captions for ALL docs in group (force visual learning, prevents caption shortcut)
 logging_steps           = 10
 progress_every_queries  = 5
