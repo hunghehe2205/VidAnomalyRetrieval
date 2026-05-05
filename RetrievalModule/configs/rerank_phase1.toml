@@ -15,40 +15,41 @@ video_root       = "/workspace/VidAnomalyRetrieval/UCF_Video"
 instruction      = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
 
 [training]
-output_dir              = "outputs/rerank-phase1-v2"
-num_hard                = 5
-num_medium              = 2
+output_dir              = "outputs/rerank-phase1-v3"
+num_hard                = 10          # was 5; group 16 closes train/eval horizon gap (eval ranks top-30)
+num_medium              = 5           # was 2
 hard_rank_lo            = 2
-hard_rank_hi            = 15
-medium_rank_lo          = 16
+hard_rank_hi            = 20          # was 15; wider hard pool for diversity
+medium_rank_lo          = 21
 medium_rank_hi          = 50
 max_frames              = 32
 fps                     = 1.0
 max_length              = 10240
 num_epochs              = 2
-learning_rate           = 5.0e-5      # was 1e-4; halved after ckpt-100 collapse (loss→0 by step 200, test R@1=1%)
-weight_decay            = 0.05        # was 0.01; stronger to fight overfit
+learning_rate           = 5.0e-5
+weight_decay            = 0.05
 warmup_ratio            = 0.1
 lr_scheduler            = "cosine"
 gradient_accumulation   = 4
 gradient_checkpointing  = true
 max_grad_norm           = 1.0
-logit_temperature       = 2.0
-hard_neg_refresh_steps  = 0           # disabled: re-mining was the dominant cost; static negs first
-hard_neg_refresh_topk   = 30          # unused while eval-in-loop disabled; kept for re-mining if re-enabled
-micro_batch_size        = 2           # was 4 (24GB); 2 to fit 16GB VRAM peak (vision tower batch + LM activations)
-caption_dropout_p       = 0.5         # per-query coin flip; if true, drop captions for ALL docs in group (force visual learning, prevents caption shortcut)
+logit_temperature       = 4.0         # was 2.0; softer + label_smoothing combats bimodal collapse seen in v2
+label_smoothing         = 0.1         # NEW: floors CE loss ~0.4, prevents overconfidence collapse seen in v2 (loss→0.0000)
+hard_neg_refresh_steps  = 0
+hard_neg_refresh_topk   = 30
+micro_batch_size        = 2
+caption_dropout_p       = 0.5
 logging_steps           = 10
 progress_every_queries  = 5
-save_steps              = 50          # save every 50 opt steps → ~16 checkpoints over a run; eval manually post-train
-eval_steps              = 0           # eval-in-loop DISABLED (Option C). Catch collapse from train/loss + train/group_acc; eval saved adapters with rerank_topk.py post-hoc
+save_steps              = 50
+eval_steps              = 0
 eval_on_test_subset     = 0
 bf16                    = true
 
 [wandb]
 enable     = true
 project    = "Finetune-VAR-Qwen3VL-Reranker"
-run_name   = "rerank-phase1-lr5e5-capdrop05-grp8"
+run_name   = "rerank-phase1-v3-ls0.1-tau4-grp16"
 log_every  = 10
 
 [hub]

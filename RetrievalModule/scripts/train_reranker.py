@@ -477,6 +477,7 @@ def main() -> None:
     eval_every = int(train_cfg.get("eval_steps", 0))
     eval_subset = int(train_cfg.get("eval_on_test_subset", 0))
     tau = float(train_cfg.get("logit_temperature", 1.0))
+    label_smoothing = float(train_cfg.get("label_smoothing", 0.0))
     hard_refresh_iters = int(train_cfg.get("hard_neg_refresh_steps", 0))
     hard_refresh_topk = int(train_cfg.get("hard_neg_refresh_topk", 30))
     micro_batch = int(train_cfg.get("micro_batch_size", 1))
@@ -496,7 +497,7 @@ def main() -> None:
     else:
         print("[eval-in-loop] disabled")
 
-    print(f"[train] logit_temperature={tau}  "
+    print(f"[train] logit_temperature={tau}  label_smoothing={label_smoothing}  "
           f"hard_neg_refresh_steps={hard_refresh_iters}  "
           f"hard_neg_refresh_topk={hard_refresh_topk}  "
           f"micro_batch_size={micro_batch}  "
@@ -504,6 +505,7 @@ def main() -> None:
     if wb_run is not None:
         wb_run.config.update({
             "logit_temperature": tau,
+            "label_smoothing": label_smoothing,
             "hard_neg_refresh_steps": hard_refresh_iters,
             "hard_neg_refresh_topk": hard_refresh_topk,
             "caption_dropout_p": caption_dropout_p,
@@ -520,6 +522,14 @@ def main() -> None:
     running_correct = 0
     running_count = 0
     running_capdrop = 0
+    # Caption-conditional metrics: detect caption shortcut.
+    # Gap = loss_nocap - loss_cap. Shortcut → gap >> 0 (loss low only when cap present).
+    running_loss_cap = 0.0
+    running_loss_nocap = 0.0
+    running_correct_cap = 0
+    running_correct_nocap = 0
+    running_count_cap = 0
+    running_count_nocap = 0
 
     for epoch in range(num_epochs):
         # Per-epoch shuffle of query order.
@@ -558,29 +568,39 @@ def main() -> None:
             )
             logits_t = group_logits.float().unsqueeze(0) / tau  # (1, group_size), temperature-scaled
             label_t = torch.tensor([label], device=logits_t.device)
-            loss_full = F.cross_entropy(logits_t, label_t)
+            loss_full = F.cross_entropy(logits_t, label_t, label_smoothing=label_smoothing)
             loss = loss_full / grad_accum
             loss.backward()
             q_dt = time.time() - q_t0
             with torch.no_grad():
                 pred_q = int(logits_t.argmax(dim=1).item())
+            hit_q = int(pred_q == label)
+            cap_present = int(not drop_caps)
+            loss_q = loss_full.item()
             if q_i == 1 or q_i % progress_every == 0 or q_i == n_queries:
                 print(f"[train] e{epoch+1} q={q_i}/{n_queries} step={global_step}/{total_steps} "
-                      f"loss={loss_full.item():.4f} hit={int(pred_q == label)} ({q_dt:.1f}s/q)",
+                      f"loss={loss_q:.4f} hit={hit_q} cap={cap_present} ({q_dt:.1f}s/q)",
                       flush=True)
                 if wb_run is not None:
                     wb_run.log({
-                        "train/loss_query": loss_full.item(),
-                        "train/hit_query": int(pred_q == label),
+                        "train/loss_query": loss_q,
+                        "train/hit_query": hit_q,
+                        "train/cap_present_query": cap_present,
                         "train/q_dt_sec": q_dt,
                         "train/global_step": global_step,
                     }, step=q_i_total)
 
-            running_loss += loss.item() * grad_accum
-            with torch.no_grad():
-                pred = int(logits_t.argmax(dim=1).item())
-                running_correct += int(pred == label)
-                running_count += 1
+            running_loss += loss_q
+            running_correct += hit_q
+            running_count += 1
+            if cap_present:
+                running_loss_cap += loss_q
+                running_correct_cap += hit_q
+                running_count_cap += 1
+            else:
+                running_loss_nocap += loss_q
+                running_correct_nocap += hit_q
+                running_count_nocap += 1
 
             if q_i % grad_accum == 0 or q_i == n_queries:
                 if max_grad_norm > 0:
@@ -595,11 +615,22 @@ def main() -> None:
                     avg_loss = running_loss / max(1, running_count)
                     acc = running_correct / max(1, running_count)
                     cap_drop_rate = running_capdrop / max(1, running_count)
+                    n_cap = max(1, running_count_cap)
+                    n_nocap = max(1, running_count_nocap)
+                    loss_cap = running_loss_cap / n_cap
+                    loss_nocap = running_loss_nocap / n_nocap
+                    acc_cap = running_correct_cap / n_cap
+                    acc_nocap = running_correct_nocap / n_nocap
+                    gap_loss = loss_nocap - loss_cap   # positive → caption shortcut signal
+                    gap_acc = acc_cap - acc_nocap      # positive → caption shortcut signal
                     lr = optim.param_groups[0]["lr"]
                     eta = elapsed / global_step * (total_steps - global_step)
                     print(f"[train] epoch={epoch+1} step={global_step}/{total_steps} "
                           f"loss={avg_loss:.4f} group_acc={acc:.3f} lr={lr:.2e} "
                           f"cap_drop={cap_drop_rate:.2f} "
+                          f"loss_cap={loss_cap:.3f}({running_count_cap}) "
+                          f"loss_nocap={loss_nocap:.3f}({running_count_nocap}) "
+                          f"gap={gap_loss:+.3f} "
                           f"elapsed={elapsed/60:.1f}m ETA={eta/60:.1f}m", flush=True)
                     if wb_run is not None:
                         wb_run.log({
@@ -607,6 +638,14 @@ def main() -> None:
                             "train/group_acc": acc,
                             "train/lr": lr,
                             "train/cap_drop_rate": cap_drop_rate,
+                            "train/loss_cap_present": loss_cap,
+                            "train/loss_cap_dropped": loss_nocap,
+                            "train/loss_cap_gap": gap_loss,
+                            "train/group_acc_cap_present": acc_cap,
+                            "train/group_acc_cap_dropped": acc_nocap,
+                            "train/group_acc_cap_gap": gap_acc,
+                            "train/n_cap_present": running_count_cap,
+                            "train/n_cap_dropped": running_count_nocap,
                             "train/epoch": epoch + (q_i / n_queries),
                             "train/elapsed_min": elapsed / 60,
                             "train/global_step": global_step,
@@ -615,6 +654,12 @@ def main() -> None:
                     running_correct = 0
                     running_count = 0
                     running_capdrop = 0
+                    running_loss_cap = 0.0
+                    running_loss_nocap = 0.0
+                    running_correct_cap = 0
+                    running_correct_nocap = 0
+                    running_count_cap = 0
+                    running_count_nocap = 0
 
                 if global_step % save_every == 0:
                     ck_dir = output_dir / f"checkpoint-{global_step}"
