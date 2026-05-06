@@ -1,0 +1,73 @@
+phase = "rerank-phase1-v5"
+seed = 42
+
+[model]
+model_name_or_path = "/workspace/VidAnomalyRetrieval/RetrievalModule/models/Qwen3-VL-Reranker-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+# Cleaned train pairs (1605 → ~1573 dedup, 5 corrupt videos removed).
+# Regenerate via: python scripts/prepare_data.py
+train_file       = "data/T2V_VAR/ucf_crime_train_dedup_v2.json"
+q_to_all_pos_file = "data/T2V_VAR/q_to_all_pos.json"
+topk_train_file  = "outputs/topk_baseline_train.json"
+descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/GeneratedDescription/descriptions_train.json"
+eval_topk_file   = "outputs/topk_baseline.json"
+eval_descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/GeneratedDescription/descriptions_test.json"
+video_root       = "/workspace/VidAnomalyRetrieval/UCF_Video"
+instruction      = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
+
+[training]
+output_dir              = "outputs/rerank-phase1-v5"
+# Group composition: keep group=16 (1 pos + 10 hard + 5 medium) — group_8
+# in v2 underfit, group_16 in v3/v4 fit fine.
+num_hard                = 10
+num_medium              = 5
+hard_rank_lo            = 2
+hard_rank_hi            = 20
+medium_rank_lo          = 21
+medium_rank_hi          = 50
+max_frames              = 32
+fps                     = 1.0
+max_length              = 10240
+# v5 strategy "Light Touch" — reduce drift from ZS to preserve complementarity
+# with stage-1 (fusion analysis showed v2 ckpt-100 hurt fusion R@1 vs ZS).
+num_epochs              = 1                # was 2 — halve drift
+learning_rate           = 3.0e-5           # was 5e-5 — slower weight changes
+weight_decay            = 0.05
+warmup_ratio            = 0.1
+lr_scheduler            = "cosine"
+gradient_accumulation   = 4
+gradient_checkpointing  = true
+max_grad_norm           = 1.0
+logit_temperature       = 4.0              # keep — prevents over-confident logits
+label_smoothing         = 0.1              # keep — prevents bimodal collapse
+hard_neg_refresh_steps  = 0
+hard_neg_refresh_topk   = 30
+micro_batch_size        = 2
+caption_dropout_p       = 0.3              # was 0.2 (v4) — slightly less caption exposure
+caption_aug_word_drop_p = 0.0              # DROP — v4 evidence: aug didn't reduce shortcut
+logging_steps           = 10
+progress_every_queries  = 5
+save_steps              = 25               # was 50 — finer ckpt granularity over short run
+eval_steps              = 0
+eval_on_test_subset     = 0
+bf16                    = true
+
+[wandb]
+enable     = true
+project    = "Finetune-VAR-Qwen3VL-Reranker"
+run_name   = "rerank-phase1-v5-clean-light"
+log_every  = 10
+
+[hub]
+push_to_hub = false
+model_id    = "hungnghehe/qwen3-vl-reranker-2b-ucf-rerank-phase1-v5"
+private     = true
+
+[lora]
+r              = 32
+lora_alpha     = 32
+lora_dropout   = 0.1
+bias           = "none"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]

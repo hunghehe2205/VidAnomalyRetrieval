@@ -21,7 +21,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional, Set
 
 import numpy as np
 import torch
@@ -69,6 +69,7 @@ class RerankTrainDataset(Dataset):
         ucf_path: Path,
         topk_path: Path,
         descriptions_path: Path,
+        q_to_all_pos_path: Optional[Path] = None,
         num_hard: int = 5,
         num_medium: int = 2,
         hard_lo: int = 2,
@@ -80,6 +81,22 @@ class RerankTrainDataset(Dataset):
         ucf = json.loads(ucf_path.read_text())
         descs = load_descriptions(descriptions_path)
         topk_map = load_query_to_topk(topk_path)
+
+        # Multi-positive map: query -> set of all positive videos for that query.
+        # Used to exclude every true positive from hard/medium neg pools, not
+        # just the kept positive in the deduped train file.
+        self.q_to_all_pos: Dict[str, Set[str]] = {}
+        if q_to_all_pos_path is not None and q_to_all_pos_path.exists():
+            raw_map = json.loads(q_to_all_pos_path.read_text())
+            self.q_to_all_pos = {q: set(vs) for q, vs in raw_map.items()}
+            n_multi = sum(1 for vs in self.q_to_all_pos.values() if len(vs) > 1)
+            n_extra = sum(max(0, len(vs) - 1) for vs in self.q_to_all_pos.values())
+            print(f"[data] multi-positive map loaded: {len(self.q_to_all_pos)} "
+                  f"queries; {n_multi} have >1 positives; {n_extra} extra "
+                  f"positives will be excluded from hard-neg pool")
+        else:
+            print("[data] no q_to_all_pos map provided — exclusion falls back "
+                  "to single positive per query")
 
         self.items: List[dict] = []
         skipped_no_caption = 0
@@ -116,23 +133,32 @@ class RerankTrainDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
-    def _slice(self, topk: List[str], lo: int, hi: int, exclude: str) -> List[str]:
-        return [topk[r - 1] for r in range(lo, min(hi, len(topk)) + 1) if topk[r - 1] != exclude]
+    def _slice(self, topk: List[str], lo: int, hi: int,
+               exclude: Iterable[str]) -> List[str]:
+        ex = set(exclude)
+        return [topk[r - 1] for r in range(lo, min(hi, len(topk)) + 1)
+                if topk[r - 1] not in ex]
 
     def __getitem__(self, idx: int) -> dict:
         it = self.items[idx]
         positive = it["positive_video"]
         topk = it["topk"]
 
-        hard_pool = self._slice(topk, self.hard_lo, self.hard_hi, positive)
-        medium_pool = self._slice(topk, self.medium_lo, self.medium_hi, positive)
+        # Exclude all true positives (from multi-pos map) plus the kept positive
+        # — the kept one is always in the set even if the map is missing/empty.
+        exclude: Set[str] = set(self.q_to_all_pos.get(it["query"], set()))
+        exclude.add(positive)
+
+        hard_pool = self._slice(topk, self.hard_lo, self.hard_hi, exclude)
+        medium_pool = self._slice(topk, self.medium_lo, self.medium_hi, exclude)
 
         hard = self.rng.sample(hard_pool, min(self.num_hard, len(hard_pool)))
         medium = self.rng.sample(medium_pool, min(self.num_medium, len(medium_pool)))
 
-        # Pad if pools were short (rare): pull anything else in topk not yet picked.
+        # Pad if pools were short (rare): pull anything else in topk not yet picked,
+        # but never pull a true positive (multi-pos map respected here too).
         target = self.num_hard + self.num_medium
-        picked = set([positive, *hard, *medium])
+        picked = exclude | set(hard) | set(medium)
         while len(hard) + len(medium) < target:
             extras = [v for v in topk if v not in picked]
             if not extras:
@@ -431,10 +457,15 @@ def main() -> None:
         path = Path(p)
         return path if path.is_absolute() else REPO_ROOT / path
 
+    q_to_all_pos_path: Optional[Path] = None
+    if "q_to_all_pos_file" in data_cfg and data_cfg["q_to_all_pos_file"]:
+        q_to_all_pos_path = _resolve(data_cfg["q_to_all_pos_file"])
+
     train_ds = RerankTrainDataset(
         ucf_path=_resolve(data_cfg["train_file"]),
         topk_path=_resolve(data_cfg["topk_train_file"]),
         descriptions_path=_resolve(data_cfg["descriptions_file"]),
+        q_to_all_pos_path=q_to_all_pos_path,
         num_hard=int(train_cfg["num_hard"]),
         num_medium=int(train_cfg["num_medium"]),
         hard_lo=int(train_cfg["hard_rank_lo"]),
