@@ -1,8 +1,23 @@
-# Reranker LoRA Phase 1 — Status (v1 → v4)
+# Reranker LoRA Phase 1 — Status (v1 → v5, closed 2026-05-07)
 
-**Last updated:** 2026-05-06
-**Active run:** v4 — `rerank-phase1-v4-aug015-drop02` (launching overnight)
-**Output dir current:** `outputs/rerank-phase1-v4/`
+**Last updated:** 2026-05-07
+**Final decision:** ship Stage-1 + ZS reranker linear score fusion. Fine-tuning experiments closed (all v2–v5 reduce fusion R@1; mechanism in §12).
+
+## 0. Final eval results (UCF-Crime test, 288 queries, top-30, K=30 ceiling)
+
+| Configuration | R@1 | R@5 | R@10 | R@20 | R@30 | MdR | miss_rate |
+|---|---|---|---|---|---|---|---|
+| **Stage-1 only** (Qwen3-VL-Embedding-2B, zero-shot) | 0.4722 | 0.7431 | 0.8715 | 0.9306 | 0.9583 | 2.0 | 0.0417 |
+| **Stage-2 zero-shot reranker** (Qwen3-VL-Reranker-2B, multimodal, no LoRA) | 0.5486 | 0.7986 | 0.8924 | 0.9514 | 0.9583 | 1.0 | 0.0417 |
+| **Best fine-tuned reranker** (v2 ckpt-50, LoRA r=32 on q/k/v/gate/up/down_proj) | 0.5625 | 0.7951 | 0.8958 | 0.9514 | 0.9583 | 1.0 | 0.0417 |
+| Best fine-tuned reranker + fusion (v2 ckpt-50, α=0.5) | 0.5868 | 0.8194 | 0.9132 | 0.9479 | 0.9583 | 1.0 | 0.0417 |
+| **Best reranker** = linear score fusion, α·stage1 + (1−α)·ZS_rerank, **α=0.4** | **0.5972** | **0.8368** | **0.9201** | **0.9549** | 0.9583 | 1.0 | 0.0417 |
+
+- Source files: `outputs/topk_baseline.json` (stage-1), `outputs/rerank_zs_multi.json` (ZS rerank), `outputs/fusion_zs.json` (best fusion).
+- Fusion script: `scripts/score_fusion.py` (per-query min-max normalization).
+- Δ best vs ZS rerank alone: **+4.86pp R@1**, **+3.82pp R@5**, **+2.77pp R@10**.
+- Δ best vs Stage-1 alone: **+12.50pp R@1**.
+- Best reranker has **no fine-tuning** — all five LoRA training attempts (v1–v5) hurt fusion R@1 vs the ZS+stage1 baseline. Detail in §12.
 
 ## 1. Bối cảnh
 
