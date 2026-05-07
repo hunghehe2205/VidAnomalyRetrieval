@@ -39,13 +39,85 @@ Pipeline 2 tầng cho UCF-Crime T2V retrieval (288 queries, 290 videos test):
 - Step 100: train loss → 0, group_acc → 1.0 (perfect memorization of train set).
 - Inverted ranking R@1 = 0.146 → partial anti-correlation = caption-string memorization, không transfer.
 
-### v2 — FIX VERIFIED, gain marginal
-- Implement `caption_dropout_p=0.5` đúng (per-query coin flip), lr 1e-4→5e-5, wd 0.01→0.05, lora_dropout 0.05→0.1.
-- Group 8 (1 pos + 5 hard rank 2–15 + 2 medium 16–30).
-- Server migration 24GB → 16GB, micro_batch 4→2.
-- Killed step 100 due to bimodal collapse pattern (per-query loss bimodal: ~70% queries → 0.0000, ~30% queries > 2.0).
-- **v2 ckpt-50: R@1 = 0.5625** (+1.35pp vs ZS 0.549) — **best ckpt cho R@1**.
-- **v2 ckpt-100: R@1 = 0.559, R@5 = 0.833** (+9pp R@5).
+### v2 — BEST FINE-TUNED RERANKER (R@1=0.5625 ở ckpt-50)
+
+#### Kiến trúc & objective
+- **Backbone**: `Qwen3-VL-Reranker-2B` (frozen), score head `score_linear` cũng frozen — chỉ adapter LoRA được train.
+- **LoRA**: `r=32, lora_alpha=32, lora_dropout=0.1, bias=none`, target_modules = `[q_proj, k_proj, v_proj, gate_proj, up_proj, down_proj]`. Trainable params ≈ 31.2M / 2.16B (1.44% total).
+- **Loss**: listwise softmax cross-entropy trên 1 group per query.
+
+  $$\mathcal{L} = -\log \frac{\exp(s_{pos})}{\sum_{c \in \text{group}} \exp(s_c)}$$
+
+  Với $s_c$ = sigmoid score từ `score_linear(last_hidden_state[:, -1])` cho mỗi (query, candidate) pair.
+- **score_linear** giữ frozen (initialized từ yes/no token weights — meaningful inductive prior từ pretrain).
+
+#### Per-query group composition (group size = 8)
+Mỗi query lấy mẫu 1 group trong `__getitem__`:
+1. **1 positive** (kept video từ train_dedup)
+2. **5 hard negatives** sampled từ stage-1 top-30 ranks **2–15** (loại positive khỏi pool)
+3. **2 medium negatives** sampled từ ranks **16–30**
+4. Group được **shuffle** trước khi forward để loại positional bias
+
+Mục đích: hard negs từ rank 2-15 = cụm "near-positive" theo stage-1 embedding (cùng class, caption tương tự). Medium 16-30 = cụm "weakly relevant". Bố cục này dạy reranker **distinguish trong cluster đã gần đúng** thay vì với random negatives.
+
+#### Hard negative mining: **stage-1 top-30, static**
+- Trước training: dump `topk_baseline_train.json` 1 lần bằng `evaluate.py --dump-topk 30 --zero-shot` (stage-1 embedder zero-shot trên train queries).
+- `hard_neg_refresh_steps = 0` → KHÔNG re-mine trong suốt training. Cùng pool 30 candidates per query suốt 2 epochs.
+- Trade-off: cheap (không cần re-encode), nhưng dễ over-fit vào tập 30 cụ thể này.
+
+#### Caption dropout (per-query coin flip, all-or-nothing)
+- `caption_dropout_p = 0.5`. Mỗi query, tung 1 coin trước forward:
+  - Heads (xác suất 0.5): **giữ caption** cho TẤT CẢ 8 docs trong group → multimodal forward `{text + video}`.
+  - Tails (0.5): **drop caption** cho TẤT CẢ 8 docs → video-only forward `{video}`.
+- All-or-nothing **trong cùng group** (không random per-doc) để loss tham chiếu cùng tập docs có/không caption nhất quán.
+- Mục đích: tránh model bypass visual bằng cách rely 100% vào caption matching (vấn đề catastrophic của v1).
+
+#### Forward & batching
+- `format_mm_instruction(query, doc_text, doc_video, instruction, fps=1.0, max_frames=32)` — Qwen3-VL chat template với:
+  ```
+  Instruction: "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
+  Query: <text>
+  Document: <text caption?> + <video frames>
+  ```
+- **Micro-batch = 2 pairs** trong forward (16GB VRAM constraint), gradient accumulation = 4 → **effective batch = 8 pairs = 1 group**.
+- `flash_attention_2`, `bf16`, `gradient_checkpointing=true` (PEFT-aware: `enable_input_require_grads()` để gradient flow qua frozen backbone).
+- `max_length=10240` để fit cả video tokens (~32 frames × 1fps) + text.
+
+#### Optimizer & schedule
+- AdamW: `lr=5e-5`, `weight_decay=0.05`, `betas` mặc định.
+- Cosine LR schedule với `warmup_ratio=0.1` (≈ 78 steps warmup trên 786 total).
+- `max_grad_norm=1.0` (grad clipping).
+- 2 epochs × 1573 queries / 4 grad_accum = **786 optimizer steps total**.
+
+#### Lý do v2 thay đổi gì so với v1 (bug fix run)
+| Param | v1 | v2 | Lý do |
+|---|---|---|---|
+| `caption_dropout_p` | 0.5 declared, **NOT impl** | 0.5 properly impl | v1 collapse vì 100% caption presence → string memorization |
+| `learning_rate` | 1e-4 | 5e-5 | quá nhanh trên small data → over-fit nhanh |
+| `weight_decay` | 0.01 | 0.05 | regularize mạnh hơn |
+| `lora_dropout` | 0.05 | 0.1 | thêm noise trong LoRA forward |
+| `micro_batch` | 4 (24GB) | 2 (16GB) | server migration |
+
+#### Training timeline
+- ckpt save mỗi 50 steps. Training killed ở step 100 do **bimodal collapse**:
+  - ~70% queries: per-query loss → 0.0000 (model rank đúng tuyệt đối trên group đã thấy)
+  - ~30% queries: per-query loss > 2.0 (random hoặc tệ hơn)
+  - → gradient signal mất cân bằng, eval ko cải thiện tiếp.
+
+#### Results (test set, K=30, multimodal mode)
+| Checkpoint | R@1 | R@5 | R@10 | R@20 | Note |
+|---|---|---|---|---|---|
+| **ckpt-50** | **0.5625** | 0.7951 | 0.8958 | 0.9514 | best R@1 (+1.39pp vs ZS) |
+| ckpt-100 | 0.5590 | **0.8333** | 0.892 | — | best R@5 (+3.47pp vs ZS); collapse signs |
+
+ckpt-50 là sweet spot: model đã học enough để improve top-1 nhưng chưa lock vào caption-shortcut hoàn toàn. ckpt-100 cải thiện ranking sâu hơn (R@5) nhưng đánh đổi ở top-1.
+
+#### Tại sao v2 chỉ +1.39pp R@1, không bứt phá
+Xem §1 và analysis trong project_fusion_finding (memory): (1) stage-1 top-30 ceiling capped tại R@30=0.9583, (2) Qwen3-VL pretrain đã in-distribution với Holmes-VAU captions, (3) intra-class confusion (multiple same-class videos trong top-30) không thể giải bằng caption matching, (4) caption shortcut emerge sớm → standalone gain marginal.
+
+**Critical**: dù v2 là best fine-tuned standalone, fusion(stage1, v2) = 0.5868 vẫn **kém hơn** fusion(stage1, ZS_rerank) = 0.5972. Đây là evidence cho thesis main contribution — xem §12.
+
+— end v2 detailed mechanism —
 
 ### v3 — DIAGNOSTIC RUN, killed step 100
 - Phase 1 patches applied: `label_smoothing=0.1`, `logit_temperature=4.0`, group 16 (1+10+5), hard pool wider (rank 2–20).
