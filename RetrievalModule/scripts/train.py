@@ -94,11 +94,24 @@ def _run(cfg: RunConfig, args: argparse.Namespace) -> None:
     if not eval_file.is_absolute():
         eval_file = REPO_ROOT / eval_file
 
+    valid_videos = None
+    if cfg.data.descriptions_file:
+        desc_path = Path(cfg.data.descriptions_file)
+        if not desc_path.is_absolute():
+            desc_path = REPO_ROOT / desc_path
+        import json as _json
+        desc = _json.loads(desc_path.read_text(encoding="utf-8"))
+        valid_videos = {d["video"] for d in desc if "_skipped" not in d}
+        from RetrievalModule.src.var.iolog import log as _log
+        _log("data", f"valid_videos: {len(valid_videos)} from {desc_path.name} "
+                     f"(skipped: {sum(1 for d in desc if '_skipped' in d)})")
+
     train_ds = QueryVideoDataset(
         data_path=str(train_file),
         query_column=cfg.data.query_column,
         video_column=cfg.data.video_column,
         server_prefix=cfg.data.server_prefix,
+        valid_videos=valid_videos,
     )
     eval_ds = QueryVideoDataset(
         data_path=str(eval_file),

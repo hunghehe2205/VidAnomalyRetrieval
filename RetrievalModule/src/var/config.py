@@ -22,6 +22,7 @@ class DataConfig:
     server_prefix: str
     fps: float
     max_frames: int
+    descriptions_file: Optional[str] = None
 
 
 @dataclass

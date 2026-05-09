@@ -8,6 +8,7 @@ attn_implementation = "flash_attention_2"
 [data]
 train_file = "data/T2V_VAR/ucf_crime_train_dedup.json"
 eval_file = "data/T2V_VAR/ucf_crime_test.json"
+descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/GeneratedDescription/descriptions_train.json"
 query_column = "English Text"
 video_column = "Video Name"
 server_prefix = "/workspace/VidAnomalyRetrieval/UCF_Video"

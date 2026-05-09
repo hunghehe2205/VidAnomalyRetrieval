@@ -57,6 +57,7 @@ class QueryVideoDataset(Dataset):
         video_column: str = "video",
         server_prefix: str = "",
         max_samples: Optional[int] = None,
+        valid_videos: Optional[set] = None,
     ) -> None:
         path = Path(data_path)
         if not path.exists():
@@ -67,6 +68,7 @@ class QueryVideoDataset(Dataset):
             rows = rows[:max_samples]
 
         self._items: List[Dict[str, Any]] = []
+        skipped = 0
         for idx, row in enumerate(rows):
             q = row.get(query_column)
             v = row.get(video_column)
@@ -74,6 +76,9 @@ class QueryVideoDataset(Dataset):
                 raise ValueError(
                     f"Row {idx} in {path}: missing '{query_column}' or '{video_column}' strings."
                 )
+            if valid_videos is not None and v not in valid_videos:
+                skipped += 1
+                continue
             resolved = _apply_server_prefix(v, server_prefix)
             self._items.append({
                 "query": q,
@@ -83,6 +88,9 @@ class QueryVideoDataset(Dataset):
             })
         if not self._items:
             raise RuntimeError(f"No samples loaded from {path}")
+        if skipped:
+            from RetrievalModule.src.var.iolog import log
+            log("data", f"filtered {skipped} samples from {path.name} (not in valid_videos)")
 
         self._hard_negs: Dict[int, List[str]] = {}
 
