@@ -60,6 +60,7 @@ def summarize(ranks: np.ndarray, scores: np.ndarray, positives: Sequence[Sequenc
         "R@20": recall_at_k(ranks, 20),
         "R@25": recall_at_k(ranks, 25),
         "R@30": recall_at_k(ranks, 30),
+        "R@50": recall_at_k(ranks, 50),
         "MdR": median_rank(ranks),
         "mAP": mean_ap(scores, positives),
     }
