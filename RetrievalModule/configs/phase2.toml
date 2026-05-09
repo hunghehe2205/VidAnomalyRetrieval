@@ -46,7 +46,7 @@ task_type = "FEATURE_EXTRACTION"
 target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
 
 [phase2]
-resume_from = "outputs/Embedding/phase1-warmup-v2/checkpoint-200"
+resume_from = "outputs/Embedding/phase1-warmup-v2/checkpoint-100"
 num_hard_negatives = 4
 mine_skip_top = 10
 remine_every_epoch = true
