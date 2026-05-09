@@ -194,18 +194,30 @@ class CategoryStratifiedSampler(Sampler[List[int]]):
 
 
 class ContrastiveCollator:
-    """Preprocess query + positive video (+ optional hard negatives)."""
+    """Preprocess query + positive video (+ optional hard negatives).
 
-    def __init__(self, engine, fps: Optional[float] = None, max_frames: Optional[int] = None) -> None:
+    If `q_to_all_pos` is provided, builds a (B,B) pos_mask tensor where
+    `pos_mask[i,j]=1` iff video_j is a positive of query_i. Loss uses this to
+    mask same-query false negatives in the in-batch InfoNCE."""
+
+    def __init__(
+        self,
+        engine,
+        fps: Optional[float] = None,
+        max_frames: Optional[int] = None,
+        q_to_all_pos: Optional[Dict[str, set]] = None,
+    ) -> None:
         self._engine = engine
         self.fps = fps
         self.max_frames = max_frames
+        self.q_to_all_pos = q_to_all_pos
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not batch:
             raise ValueError("Empty batch.")
         queries = [b["query"] for b in batch]
         positives = [b["video"] for b in batch]
+        raw_videos = [b.get("raw_video", b["video"]) for b in batch]
 
         query_inputs = self._engine.preprocess([{"text": q} for q in queries])
         positive_inputs = self._engine.preprocess(
@@ -225,6 +237,20 @@ class ContrastiveCollator:
                 [{"video": v, "fps": self.fps, "max_frames": self.max_frames} for v in negatives_flat]
             )
 
+        pos_mask = None
+        if self.q_to_all_pos is not None:
+            import torch
+            B = len(batch)
+            pos_mask = torch.zeros((B, B), dtype=torch.bool)
+            for i, q in enumerate(queries):
+                positives_i = self.q_to_all_pos.get(q)
+                if not positives_i:
+                    pos_mask[i, i] = True
+                    continue
+                for j, vj in enumerate(raw_videos):
+                    if vj in positives_i:
+                        pos_mask[i, j] = True
+
         return {
             "queries": queries,
             "positives": positives,
@@ -232,6 +258,7 @@ class ContrastiveCollator:
             "positive_inputs": positive_inputs,
             "hard_neg_inputs": hard_neg_inputs,
             "hard_neg_counts": negative_counts,
+            "pos_mask": pos_mask,
         }
 
 

@@ -259,7 +259,10 @@ class ContrastiveTrainer:
     def _phase1_loss_step(self, batch: Dict[str, Any]) -> torch.Tensor:
         q = self.engine.encode_with_grad(batch["query_inputs"])
         v = self.engine.encode_with_grad(batch["positive_inputs"])
-        return symmetric_infonce(q, v, self.cfg.training.temperature)
+        pos_mask = batch.get("pos_mask")
+        if pos_mask is not None:
+            pos_mask = pos_mask.to(q.device)
+        return symmetric_infonce(q, v, self.cfg.training.temperature, pos_mask=pos_mask)
 
     def _phase2_loss_step(self, batch: Dict[str, Any]) -> torch.Tensor:
         q = self.engine.encode_with_grad(batch["query_inputs"])
@@ -267,10 +270,14 @@ class ContrastiveTrainer:
         hn_inputs = batch["hard_neg_inputs"]
         hn_counts = batch["hard_neg_counts"]
         hn_emb = self.engine.encode_with_grad(hn_inputs) if hn_inputs is not None else None
+        pos_mask = batch.get("pos_mask")
+        if pos_mask is not None:
+            pos_mask = pos_mask.to(q.device)
         return phase2_combined_loss(
             q, v, hn_emb, hn_counts,
             temperature=self.cfg.training.temperature,
             alpha=self.cfg.phase2.v2t_alpha,
+            pos_mask=pos_mask,
         )
 
     # ----- phase2 remining -----
@@ -294,6 +301,8 @@ class ContrastiveTrainer:
             video_paths=self.train_ds.video_paths,
             k=self.cfg.phase2.num_hard_negatives,
             skip_top=self.cfg.phase2.mine_skip_top,
+            queries=self.train_ds.queries,
+            q_to_all_pos=getattr(self.collator, "q_to_all_pos", None),
         )
         self.train_ds.set_hard_negatives(mapping)
         self.engine.model.train()
@@ -360,7 +369,10 @@ class ContrastiveTrainer:
             for i, batch in enumerate(loader, start=1):
                 q = self.engine.encode_with_grad(batch["query_inputs"])
                 v = self.engine.encode_with_grad(batch["positive_inputs"])
-                loss = symmetric_infonce(q, v, self.cfg.training.temperature)
+                pos_mask = batch.get("pos_mask")
+                if pos_mask is not None:
+                    pos_mask = pos_mask.to(q.device)
+                loss = symmetric_infonce(q, v, self.cfg.training.temperature, pos_mask=pos_mask)
                 logits = q @ v.T
                 labels = torch.arange(logits.shape[0], device=logits.device)
                 top1 = (logits.argmax(dim=1) == labels).float().mean()

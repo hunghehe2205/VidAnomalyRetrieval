@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -113,6 +113,18 @@ def _run(cfg: RunConfig, args: argparse.Namespace) -> None:
         server_prefix=cfg.data.server_prefix,
         valid_videos=valid_videos,
     )
+
+    # Build query → all-positives map from filtered train data (multi-positive aware).
+    from collections import defaultdict
+    from RetrievalModule.src.var.iolog import log as _log2
+    q_to_all_pos: Dict[str, set] = defaultdict(set)
+    for it in train_ds._items:
+        q_to_all_pos[it["query"]].add(it["raw_video"])
+    multi_pos = sum(1 for vs in q_to_all_pos.values() if len(vs) > 1)
+    extra_pos = sum(len(vs) - 1 for vs in q_to_all_pos.values() if len(vs) > 1)
+    _log2("data", f"q_to_all_pos: {len(q_to_all_pos)} unique queries, "
+                  f"{multi_pos} multi-positive (+{extra_pos} extra positives)")
+
     eval_ds = QueryVideoDataset(
         data_path=str(eval_file),
         query_column=cfg.data.query_column,
@@ -120,7 +132,12 @@ def _run(cfg: RunConfig, args: argparse.Namespace) -> None:
         server_prefix=cfg.data.server_prefix,
     ) if eval_file.exists() else None
 
-    collator = ContrastiveCollator(engine=engine, fps=cfg.data.fps, max_frames=cfg.data.max_frames)
+    collator = ContrastiveCollator(
+        engine=engine,
+        fps=cfg.data.fps,
+        max_frames=cfg.data.max_frames,
+        q_to_all_pos=dict(q_to_all_pos),
+    )
     wandb_run = _maybe_init_wandb(cfg, enabled=not args.no_wandb)
 
     trainer = ContrastiveTrainer(

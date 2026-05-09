@@ -58,16 +58,74 @@ def _run(args: argparse.Namespace) -> None:
         return
 
     train_path = REPO_ROOT / cfg.data.train_file
+
+    # Mirror train.py: build valid_videos filter + q_to_all_pos for multi-pos masking.
+    import json as _json
+    from collections import defaultdict
+    valid_videos = None
+    if cfg.data.descriptions_file:
+        desc_path = Path(cfg.data.descriptions_file)
+        if not desc_path.is_absolute():
+            desc_path = REPO_ROOT / desc_path
+        desc = _json.loads(desc_path.read_text(encoding="utf-8"))
+        valid_videos = {d["video"] for d in desc if "_skipped" not in d}
+        log("smoke", f"valid_videos: {len(valid_videos)} (skipped: {sum(1 for d in desc if '_skipped' in d)})")
+
+    full_ds = QueryVideoDataset(
+        data_path=str(train_path),
+        query_column=cfg.data.query_column,
+        video_column=cfg.data.video_column,
+        server_prefix=cfg.data.server_prefix,
+        valid_videos=valid_videos,
+    )
+    q_to_all_pos = defaultdict(set)
+    for it in full_ds._items:
+        q_to_all_pos[it["query"]].add(it["raw_video"])
+    multi_pos_qs = {q: vs for q, vs in q_to_all_pos.items() if len(vs) > 1}
+    log("smoke", f"q_to_all_pos: {len(q_to_all_pos)} queries, {len(multi_pos_qs)} multi-positive")
+
+    # Pick a multi-positive query's pairs as the smoke batch (so pos_mask is non-trivial).
+    selected_indices = []
+    if multi_pos_qs:
+        target_q = next(iter(multi_pos_qs))
+        for i, it in enumerate(full_ds._items):
+            if it["query"] == target_q:
+                selected_indices.append(i)
+        log("smoke", f"smoke batch: multi-pos query with {len(selected_indices)} positives")
+    if len(selected_indices) < args.num_samples:
+        for i in range(len(full_ds._items)):
+            if i not in selected_indices:
+                selected_indices.append(i)
+            if len(selected_indices) >= args.num_samples:
+                break
+    selected_indices = selected_indices[:args.num_samples]
+
     ds = QueryVideoDataset(
         data_path=str(train_path),
         query_column=cfg.data.query_column,
         video_column=cfg.data.video_column,
         server_prefix=cfg.data.server_prefix,
-        max_samples=args.num_samples,
+        valid_videos=valid_videos,
     )
-    collator = ContrastiveCollator(engine=engine, fps=cfg.data.fps, max_frames=cfg.data.max_frames)
+    ds._items = [full_ds._items[i] for i in selected_indices]
+
+    collator = ContrastiveCollator(
+        engine=engine,
+        fps=cfg.data.fps,
+        max_frames=cfg.data.max_frames,
+        q_to_all_pos=dict(q_to_all_pos),
+    )
     loader = DataLoader(ds, batch_size=args.num_samples, shuffle=False, collate_fn=collator)
     batch = next(iter(loader))
+
+    pos_mask = batch.get("pos_mask")
+    if pos_mask is not None:
+        log("smoke", f"pos_mask shape: {tuple(pos_mask.shape)}")
+        log("smoke", f"pos_mask:\n{pos_mask.int().tolist()}")
+        if pos_mask.diag().all().item():
+            log("smoke", "  diagonal: all True ✓")
+        off_diag_count = int(pos_mask.sum().item() - pos_mask.diag().sum().item())
+        log("smoke", f"  off-diagonal positives (false-negs masked): {off_diag_count}")
 
     q = engine.encode_with_grad(batch["query_inputs"])
     v = engine.encode_with_grad(batch["positive_inputs"])
@@ -76,8 +134,9 @@ def _run(args: argparse.Namespace) -> None:
     q_shape, v_shape = tuple(q.shape), tuple(v.shape)
 
     # Mimic trainer: backward then release graph + grads to free activations.
-    # Without this, smoke OOMs at bs≥2 even though trainer runs fine.
-    loss = symmetric_infonce(q, v, cfg.training.temperature)
+    if pos_mask is not None:
+        pos_mask = pos_mask.to(q.device)
+    loss = symmetric_infonce(q, v, cfg.training.temperature, pos_mask=pos_mask)
     loss.backward()
     for p in engine.model.parameters():
         p.grad = None
@@ -86,6 +145,8 @@ def _run(args: argparse.Namespace) -> None:
     log("smoke", f"video shape: {v_shape}")
     log("smoke", f"score diag : {diag}")
     log("smoke", f"loss       : {float(loss.item()):.4f}")
+    if not (loss.item() == loss.item()):  # NaN check
+        raise RuntimeError("loss is NaN — pos_mask likely wrong (no valid negatives left).")
     log("smoke", "passed.")
 
 

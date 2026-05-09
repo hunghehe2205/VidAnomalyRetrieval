@@ -1,7 +1,7 @@
 """mining — encode corpus + mine hard negatives (with graceful fallback)."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import torch
@@ -93,12 +93,15 @@ def _pick_from_ranking(
     positive_idx: int,
     skip_top: int,
     k: int,
+    extra_excludes: Optional[Set[int]] = None,
 ) -> List[int]:
     picked: List[int] = []
     for r, cand in enumerate(ranked):
         if r < skip_top:
             continue
         if int(cand) == int(positive_idx):
+            continue
+        if extra_excludes is not None and int(cand) in extra_excludes:
             continue
         if categories[int(cand)] == anchor_cat:
             continue
@@ -115,17 +118,37 @@ def mine_hard_negatives(
     video_paths: Sequence[str],
     k: int = 8,
     skip_top: int = 10,
+    queries: Optional[Sequence[str]] = None,
+    q_to_all_pos: Optional[Dict[str, Set[str]]] = None,
 ) -> Dict[int, List[str]]:
     """Fallback ladder (each level logs a warning):
       1. skip_top_used = skip_top, filter same-category + not positive.
       2. skip_top_used = skip_top // 2.
       3. skip_top_used = 0.
-      4. pad from same-category (skip_top=0, not-positive)."""
+      4. pad from same-category (skip_top=0, not-positive).
+
+    If `queries` and `q_to_all_pos` provided, also exclude all true positives of
+    each query (multi-positive aware), not just the row's primary positive."""
     if query_emb.shape[0] != video_emb.shape[0]:
         raise ValueError("query_emb and video_emb must align 1:1 with dataset rows.")
     n = query_emb.shape[0]
     if len(categories) != n or len(video_paths) != n:
         raise ValueError("categories/video_paths must align with embedding rows.")
+
+    # Build per-row exclude sets (indices of all true positives for the row's query)
+    extra_excludes: List[Set[int]] = [set() for _ in range(n)]
+    if queries is not None and q_to_all_pos:
+        if len(queries) != n:
+            raise ValueError("queries length must match embedding rows.")
+        path_to_idx: Dict[str, List[int]] = {}
+        for idx, p in enumerate(video_paths):
+            path_to_idx.setdefault(p, []).append(idx)
+        for i, q in enumerate(queries):
+            pos_paths = q_to_all_pos.get(q) or set()
+            for p in pos_paths:
+                for idx in path_to_idx.get(p, ()):
+                    if idx != i:
+                        extra_excludes[i].add(idx)
 
     scores = query_emb @ video_emb.T  # (N, N)
     order = np.argsort(-scores, axis=1)
@@ -138,23 +161,26 @@ def mine_hard_negatives(
     for i in range(n):
         ranked = order[i]
         anchor_cat = categories[i]
+        excl = extra_excludes[i] if extra_excludes[i] else None
 
-        picked = _pick_from_ranking(ranked, categories, anchor_cat, i, skip_top, k)
+        picked = _pick_from_ranking(ranked, categories, anchor_cat, i, skip_top, k, excl)
         if len(picked) < k:
             degraded_relaxed += 1
             relaxed = max(0, skip_top // 2)
-            picked = _pick_from_ranking(ranked, categories, anchor_cat, i, relaxed, k)
+            picked = _pick_from_ranking(ranked, categories, anchor_cat, i, relaxed, k, excl)
 
         if len(picked) < k:
             degraded_zero += 1
-            picked = _pick_from_ranking(ranked, categories, anchor_cat, i, 0, k)
+            picked = _pick_from_ranking(ranked, categories, anchor_cat, i, 0, k, excl)
 
         if len(picked) < k:
             degraded_samecat += 1
-            # Pad from same-category ranking (skip positive)
+            # Pad from same-category ranking (skip positive + multi-pos)
             extra: List[int] = []
             for cand in ranked:
                 if int(cand) == i:
+                    continue
+                if excl is not None and int(cand) in excl:
                     continue
                 if int(cand) in picked:
                     continue
