@@ -30,13 +30,14 @@ fi
 
 echo
 echo "=== Step 2: launching v5 training (overnight, ~14h) ==="
+mkdir -p outputs/Reranker
 nohup bash -c "PYTHONPATH=$REPO python scripts/train_reranker.py \
     --config configs/rerank_phase1_v5.toml" \
-    > outputs/train_reranker_v5.log 2>&1 &
+    > outputs/Reranker/train_reranker_v5.log 2>&1 &
 
 PID=$!
-echo "$PID" > outputs/train_v5.pid
-echo "[launch] PID=$PID  log=outputs/train_reranker_v5.log"
+echo "$PID" > outputs/Reranker/train_v5.pid
+echo "[launch] PID=$PID  log=outputs/Reranker/train_reranker_v5.log"
 echo
-echo "Tail with:  tail -f outputs/train_reranker_v5.log"
-echo "Kill with:  kill \$(cat outputs/train_v5.pid)"
+echo "Tail with:  tail -f outputs/Reranker/train_reranker_v5.log"
+echo "Kill with:  kill \$(cat outputs/Reranker/train_v5.pid)"

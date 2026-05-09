@@ -16,7 +16,7 @@ Usage:
     --video-root /workspace/VidAnomalyRetrieval/UCF_Video \
     --mode multimodal
 
-Long runs: prepend `nohup ... > outputs/rerank_<mode>.log 2>&1 &`.
+Long runs: prepend `nohup ... > outputs/Reranker/rerank_<mode>.log 2>&1 &`.
 """
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--micro-batch", type=int, default=4,
                    help="GPU micro-batch within a query (1 = original per-pair).")
     p.add_argument("--out", type=Path, default=None,
-                   help="Output JSON (default: outputs/topk_reranked_<mode>.json).")
+                   help="Output JSON (default: outputs/Reranker/topk_reranked_<mode>.json).")
     p.add_argument("--metrics-out", type=Path, default=None)
     p.add_argument("--attn-impl", default="flash_attention_2",
                    help="Set to 'eager' if flash-attn unavailable.")
@@ -263,7 +263,7 @@ def main() -> None:
         "items": out_items,
     }
 
-    out_path = args.out or REPO_ROOT / "outputs" / f"topk_reranked_{args.mode}.json"
+    out_path = args.out or REPO_ROOT / "outputs" / "Reranker" / f"topk_reranked_{args.mode}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out_payload, ensure_ascii=False, indent=2))
     print(f"\n[rerank] saved: {out_path}")
