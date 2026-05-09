@@ -10,10 +10,10 @@
 #
 #   # Custom checkpoints:
 #   bash scripts/eval_checkpoints.sh configs/phase1.toml \
-#     outputs/phase1-warmup-v2/checkpoint-150 \
-#     outputs/phase1-warmup-v2/checkpoint-200 \
-#     outputs/phase1-warmup-v2/checkpoint-300 \
-#     outputs/phase1-warmup-v2/final_adapter
+#     outputs/Embedding/phase1-warmup-v2/checkpoint-150 \
+#     outputs/Embedding/phase1-warmup-v2/checkpoint-200 \
+#     outputs/Embedding/phase1-warmup-v2/checkpoint-300 \
+#     outputs/Embedding/phase1-warmup-v2/final_adapter
 
 set -euo pipefail
 
@@ -22,15 +22,15 @@ shift || true
 
 if [[ $# -eq 0 ]]; then
   CHECKPOINTS=(
-    outputs/phase1-warmup-v2/checkpoint-150
-    outputs/phase1-warmup-v2/checkpoint-200
+    outputs/Embedding/phase1-warmup-v2/checkpoint-150
+    outputs/Embedding/phase1-warmup-v2/checkpoint-200
   )
 else
   CHECKPOINTS=("$@")
 fi
 
 BATCH_SIZE=4
-OUT_DIR=outputs
+OUT_DIR=outputs/Embedding
 mkdir -p "$OUT_DIR"
 
 echo "=== Eval config: $CONFIG ==="
