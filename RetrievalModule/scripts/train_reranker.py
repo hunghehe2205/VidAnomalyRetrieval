@@ -38,13 +38,28 @@ from src.models.qwen3_vl_reranker import Qwen3VLReranker  # noqa: E402
 # Data
 # --------------------------------------------------------------------------- #
 
-def load_descriptions(path: Path) -> Dict[str, str]:
+def load_descriptions(path: Path) -> Dict[str, List[str]]:
+    """Load descriptions. Supports two schemas:
+      1. Legacy: `{"video": "...", "video_caption": str}` → wrapped as [str]
+      2. Pool:   `{"video": "...", "video_captions": [str, ...]}` → used as-is
+
+    Returns Dict[video → list of caption surface forms]. At forward time, the
+    training loop samples one caption per query/forward (so model can't memorize
+    a single string). Eval also samples but with deterministic rng → reproducible.
+    """
     items = json.loads(path.read_text())
-    out: Dict[str, str] = {}
+    out: Dict[str, List[str]] = {}
     for r in items:
         if "_skipped" in r or "video" not in r:
             continue
-        out[r["video"]] = r.get("video_caption", "") or ""
+        if "video_captions" in r and isinstance(r["video_captions"], list):
+            pool = [c for c in r["video_captions"] if isinstance(c, str) and c.strip()]
+            if pool:
+                out[r["video"]] = pool
+        else:
+            cap = r.get("video_caption", "") or ""
+            if cap:
+                out[r["video"]] = [cap]
     return out
 
 
@@ -251,17 +266,25 @@ def augment_caption(text: str, drop_p: float, rng: random.Random) -> str:
 def build_doc(
     video_rel: str,
     video_root: Path,
-    descs: Dict[str, str],
+    descs: Dict[str, List[str]],
     aug_drop_p: float = 0.0,
     aug_rng: Optional[random.Random] = None,
 ) -> dict:
     """Build doc dict for reranker. Omits 'text' key if caption is empty so that
     the chat template renders pure-video docs (no empty `<Document>: ` line).
 
-    Optional `aug_drop_p` + `aug_rng` apply word-drop augmentation to non-empty
-    captions (training only — eval should pass aug_drop_p=0 to keep deterministic).
+    `descs[video]` is a list of caption surface forms (pool). If len > 1 and
+    `aug_rng` provided, samples one randomly each forward — prevents memorization
+    of any single string. Falls back to first caption if no rng (eval path).
+
+    Optional `aug_drop_p` + `aug_rng` apply word-drop on top of pool sampling.
     """
-    cap = descs.get(video_rel, "")
+    pool = descs.get(video_rel, [])
+    if isinstance(pool, str):  # defensive: legacy callers
+        pool = [pool] if pool else []
+    cap = ""
+    if pool:
+        cap = aug_rng.choice(pool) if (aug_rng is not None and len(pool) > 1) else pool[0]
     doc: Dict = {"video": str(video_root / video_rel)}
     if cap:
         if aug_drop_p > 0.0 and aug_rng is not None:
@@ -330,7 +353,7 @@ def _score_candidates(
     reranker: Qwen3VLReranker,
     query: str,
     candidates: List[str],
-    descs: Dict[str, str],
+    descs: Dict[str, List[str]],
     video_root: Path,
     instruction: str,
     fps: float,
@@ -347,7 +370,7 @@ def _score_candidates(
 def evaluate_test_subset(
     reranker: Qwen3VLReranker,
     eval_items: List[dict],
-    descs: Dict[str, str],
+    descs: Dict[str, List[str]],
     video_root: Path,
     instruction: str,
     fps: float,
@@ -378,7 +401,7 @@ def evaluate_test_subset(
 def remine_hard_negatives(
     reranker: Qwen3VLReranker,
     train_ds: "RerankTrainDataset",
-    descs: Dict[str, str],
+    descs: Dict[str, List[str]],
     video_root: Path,
     instruction: str,
     fps: float,
@@ -556,7 +579,7 @@ def main() -> None:
 
     # ---- Eval data (for eval-in-loop) ----
     eval_items: List[dict] = []
-    descs_eval: Dict[str, str] = {}
+    descs_eval: Dict[str, List[str]] = {}
     if eval_every > 0 and eval_subset > 0 and "eval_topk_file" in data_cfg:
         eval_topk_path = _resolve(data_cfg["eval_topk_file"])
         eval_items = load_eval_items(eval_topk_path, eval_subset)

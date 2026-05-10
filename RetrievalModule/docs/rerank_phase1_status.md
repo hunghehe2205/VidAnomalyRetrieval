@@ -1,7 +1,119 @@
-# Reranker LoRA Phase 1 — Status (v1 → v5, closed 2026-05-07)
+# Reranker LoRA Phase 1 — Status
 
-**Last updated:** 2026-05-07
-**Final decision:** ship Stage-1 + ZS reranker linear score fusion. Fine-tuning experiments closed (all v2–v5 reduce fusion R@1; mechanism in §12).
+**Last updated:** 2026-05-10
+**Active experiment:** v6 — relaunch với new mining (P2 ck-900) + new captions (`summary` 43w avg, không phải `video_caption` 104w skewed). Section §0a.
+**Closed:** v1-v5 (2026-05-07) — all underperformed ZS+stage1 fusion. Detail §0 + §12.
+
+> **Note (2026-05-10):** ship target đổi sang **standalone R@1** thay vì fusion R@1. Lý do: fusion gain trước đây (+4.86pp R@1) là artifact của weak stage-1 + caption shortcut. Với strong stage-1 mới (P2 ck-900 R@1=0.5556), fusion gain sụp xuống ~0pp (xem §0a). Apples-to-apples comparison giờ là standalone.
+
+---
+
+## 0a. v6 — relaunch với input mới (active)
+
+### Hypothesis
+
+v1-v5 fail vì 2 confounds: (a) weak stage-1 mining pool (ZS R@30=0.9583), (b) caption shortcut từ `video_caption` của Holmes-VAU (104w avg, max 984w, distribution skewed). v6 fix cả hai:
+
+| Variable | v1-v5 (closed) | **v6 (active)** |
+|---|---|---|
+| Stage-1 mining source | ZS embedder (R@30=0.9583) | **Phase 2 ck-900** (R@30=0.9792, R@1=0.5556) |
+| Caption text | `video_caption` (mean 104w, max 984w) | **`summary`** (mean 43w, max 90w, no outliers) |
+| Train mining pool size | 1574 dedup × 30 | **1570 unique × 50** từ pool 1605 (multi-pos preserved) |
+
+### ZS rerank trên setup mới (đã chạy 2026-05-10)
+
+| metric | stage-1 (ck-900) | ZS rerank multimodal | Δ |
+|---|---|---|---|
+| R@1 | 0.5556 | 0.5625 | **+0.69pp** |
+| R@5 | 0.8472 | 0.8229 | −2.43pp |
+| R@10 | 0.9236 | 0.9132 | −1.04pp |
+| R@30 | 0.9792 | 0.9792 | = (mining ceiling) |
+
+**Observations**:
+1. **Reranker lift sụp từ +7.62pp (v1-v5 baseline) xuống +0.69pp** với caption mới. Confirms caption shortcut hypothesis: 6+pp lift cũ phần lớn là text matching, không phải video signal.
+2. R@5/R@10 regress nhẹ — reranker reorder mid-rank sai. ~7 queries swap.
+3. **Ceiling effect**: stage-1 đã ở 0.5556 → ít room để rerank fix.
+
+### v6 fine-tune setup
+
+Hyperparams = v2 sweet spot (verified từ git 3de805e^), KHÔNG dùng v3+ additions (label_smoothing=0, caption_aug_word_drop_p=0).
+
+| Field | v6 |
+|---|---|
+| `train_file` | `data/T2V_VAR/ucf_crime_train_dedup_v2.json` (1570 dedup) |
+| `q_to_all_pos_file` | `data/T2V_VAR/q_to_all_pos.json` (multi-pos exclusion) |
+| `topk_train_file` | `outputs/Embedding/topk_train_phase2_ck900.json` (1570 q × top-50, pool 1605) |
+| `descriptions_file` | `DescriptionModule/Summary/descriptions_train_v2.json` (1605 entries, `summary` field) |
+| `eval_topk_file` | `outputs/Embedding/topk_test_phase2_ck900.json` (288 q × top-30) |
+| `eval_descriptions_file` | `DescriptionModule/Summary/descriptions_test_v2.json` (290 entries) |
+| `num_hard` / `num_medium` | 5 / 2 (group size 8 = 1 pos + 5 hard + 2 medium) |
+| `hard_rank_lo / hi` | 2 / 15 |
+| `medium_rank_lo / hi` | 16 / 50 |
+| `num_epochs` | 2 |
+| `learning_rate` | 5.0e-5 |
+| `logit_temperature` | 2.0 |
+| `caption_dropout_p` | 0.5 |
+| `label_smoothing` | 0.0 (NOT v3+ value) |
+| `caption_aug_word_drop_p` | 0.0 (NOT v4+ value) |
+| `output_dir` | `outputs/Reranker/rerank-phase1-v6` |
+
+Config file: `configs/rerank_phase1_v6.toml`.
+
+### v6 evaluation criterion
+
+- **Primary**: standalone R@1 trên test (target: > ZS rerank 0.5625).
+- **Secondary**: R@5, R@10 không regress.
+- **Fusion**: report nhưng không primary metric. v1-v5 era đã dropped.
+
+### Expected outcomes
+
+1. **R@1 > 0.5625** (beat ZS): caption shortcut bị cắt nhưng video signal được tăng cường → ship.
+2. **R@1 ≈ 0.5625** (tie ZS): null result → confirm reranker khó học video signal thực sự, nhưng caption shortcut hypothesis vẫn được confirm bởi ZS lift drop. Vẫn là contribution cho thesis.
+3. **R@1 < 0.5625** (regress): fine-tune phá ZS, tương tự v1-v5. Cần ablate xem là do mining mới hay caption mới.
+
+### Mining pipeline cho v6 (chi tiết)
+
+Stage-1 dump bằng `evaluate.py --dump-topk`:
+
+```bash
+# Test top-30
+PYTHONPATH=$REPO python scripts/evaluate.py \
+  --config configs/phase1.toml \
+  --adapter outputs/Embedding/phase2-hardneg/checkpoint-900 \
+  --dump-topk 30 \
+  --topk-out outputs/Embedding/topk_test_phase2_ck900.json
+
+# Train top-50 (cần filtered file để giữ multi-pos)
+python3 -c "  # tạo ucf_crime_train_filtered.json (1605 rows, multi-pos preserved)
+import json
+desc = json.load(open('$REPO/DescriptionModule/GeneratedDescription/descriptions_train.json'))
+valid = {d['video'] for d in desc if '_skipped' not in d and d.get('video_caption')}
+data = json.load(open('data/T2V_VAR/ucf_crime_train.json'))
+filtered = [r for r in data if r.get('Video Name') in valid]
+json.dump(filtered, open('data/T2V_VAR/ucf_crime_train_filtered.json', 'w'), indent=2, ensure_ascii=False)
+"
+
+PYTHONPATH=$REPO python scripts/evaluate.py \
+  --config configs/phase1.toml \
+  --adapter outputs/Embedding/phase2-hardneg/checkpoint-900 \
+  --data-file data/T2V_VAR/ucf_crime_train_filtered.json \
+  --dump-topk 50 \
+  --topk-out outputs/Embedding/topk_train_phase2_ck900.json
+```
+
+Caption file conversion (bằng `scripts/jsonl_to_descriptions.py`):
+
+```bash
+python3 scripts/jsonl_to_descriptions.py \
+  --input ../DescriptionModule/Summary/train_summaries_v2.jsonl \
+  --output ../DescriptionModule/Summary/descriptions_train_v2.json \
+  --field summary
+# Tương tự cho test
+```
+
+Converter handle multi-line JSON entries (e.g. Vandalism042) qua streaming `json.JSONDecoder.raw_decode`. Output schema match `train_reranker.py:load_descriptions` expectation.
+
+---
 
 ## 0. Final eval results (UCF-Crime test, 288 queries, top-30, K=30 ceiling)
 

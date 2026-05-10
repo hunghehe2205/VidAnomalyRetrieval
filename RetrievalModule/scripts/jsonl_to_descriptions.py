@@ -54,15 +54,27 @@ def _build_caption(record: dict, field: str) -> str:
     raise ValueError(f"unknown --field: {field}")
 
 
+def _build_caption_pool(record: dict) -> list:
+    """Pool of valid LLM-generated captions per video. Sampled at train forward
+    so model can't memorize a single surface form."""
+    pool = []
+    for f in ("summary", "full_summary"):
+        v = (record.get(f) or "").strip()
+        if v:
+            pool.append(v)
+    return pool
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--input", type=Path, required=True,
                    help="Source JSONL file (train_summaries_v2.jsonl).")
     p.add_argument("--output", type=Path, required=True,
                    help="Destination JSON file (descriptions_*.json schema).")
-    p.add_argument("--field", choices=["summary", "full_summary", "full+anomaly"],
+    p.add_argument("--field", choices=["summary", "full_summary", "full+anomaly", "pool"],
                    default="summary",
-                   help="Which JSONL field to write as video_caption.")
+                   help="Which JSONL field to write as video_caption. "
+                        "'pool' emits `video_captions: [summary, full_summary]` for runtime sampling.")
     args = p.parse_args()
 
     if not args.input.exists():
@@ -76,11 +88,18 @@ def main() -> None:
         if not video:
             n_no_video += 1
             continue
-        cap = _build_caption(rec, args.field)
-        if not cap:
-            n_empty += 1
-            continue
-        out.append({"video": video, "video_caption": cap})
+        if args.field == "pool":
+            pool = _build_caption_pool(rec)
+            if not pool:
+                n_empty += 1
+                continue
+            out.append({"video": video, "video_captions": pool})
+        else:
+            cap = _build_caption(rec, args.field)
+            if not cap:
+                n_empty += 1
+                continue
+            out.append({"video": video, "video_caption": cap})
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(

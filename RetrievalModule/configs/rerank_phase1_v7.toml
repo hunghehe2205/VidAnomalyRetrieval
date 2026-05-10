@@ -1,0 +1,78 @@
+phase = "rerank-phase1-v7"
+seed = 42
+
+# v7 = v6 + 4 anti-shortcut measures based on v6 step 50→80 finding (caption shortcut
+# emerged exactly at lr peak 5e-5; loss_cap → 0.04 while loss_nocap → 2.07):
+#   1. lr 5e-5 → 2e-5         — slower weight movement, less likely to fall into shortcut
+#   2. caption_aug_word_drop_p 0.0 → 0.3 — drop ~30% words per forward (caption never identical)
+#   3. LoRA r 32 → 16          — half memorization capacity (16M vs 31M params)
+#   4. caption pool [summary, full_summary] — sample one per forward via aug_rng (2 valid LLM-generated paraphrases)
+# Goal: model học semantic caption ↔ video matching, không memorize chuỗi caption.
+
+[model]
+model_name_or_path = "/workspace/VidAnomalyRetrieval/RetrievalModule/models/Qwen3-VL-Reranker-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file        = "data/T2V_VAR/ucf_crime_train_dedup_v2.json"
+q_to_all_pos_file = "data/T2V_VAR/q_to_all_pos.json"
+topk_train_file   = "outputs/Embedding/topk_train_phase2_ck900.json"
+descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/Summary/descriptions_train_v2_pool.json"
+eval_topk_file    = "outputs/Embedding/topk_test_phase2_ck900.json"
+eval_descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/Summary/descriptions_test_v2_pool.json"
+video_root        = "/workspace/VidAnomalyRetrieval/UCF_Video"
+instruction       = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
+
+[training]
+output_dir              = "outputs/Reranker/rerank-phase1-v7"
+# v2 sweet spot group composition
+num_hard                = 5
+num_medium              = 2
+hard_rank_lo            = 2
+hard_rank_hi            = 15
+medium_rank_lo          = 16
+medium_rank_hi          = 50
+max_frames              = 32
+fps                     = 1.0
+max_length              = 10240
+num_epochs              = 2
+# === v7 anti-shortcut levers ===
+learning_rate           = 2.0e-5      # was 5.0e-5 (v6) — prevent shortcut emergence
+caption_aug_word_drop_p = 0.3         # was 0.0 (v6) — surface form never identical
+caption_dropout_p       = 0.5         # KEEP — model robust to no-caption mode
+# ===
+weight_decay            = 0.05
+warmup_ratio            = 0.1
+lr_scheduler            = "cosine"
+gradient_accumulation   = 4
+gradient_checkpointing  = true
+max_grad_norm           = 1.0
+logit_temperature       = 2.0
+label_smoothing         = 0.0
+hard_neg_refresh_steps  = 0
+hard_neg_refresh_topk   = 30
+micro_batch_size        = 2
+logging_steps           = 10
+progress_every_queries  = 5
+save_steps              = 25          # was 50 (v6) — finer granularity around shortcut transition
+eval_steps              = 0
+eval_on_test_subset     = 0
+bf16                    = true
+
+[wandb]
+enable     = true
+project    = "Finetune-VAR-Qwen3VL-Reranker"
+run_name   = "rerank-phase1-v7-lowlr-pool-r16"
+log_every  = 10
+
+[hub]
+push_to_hub = false
+model_id    = "hungnghehe/qwen3-vl-reranker-2b-ucf-rerank-phase1-v7"
+private     = true
+
+[lora]
+r              = 16          # was 32 (v6) — half memorization capacity
+lora_alpha     = 16          # match r
+lora_dropout   = 0.1
+bias           = "none"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
