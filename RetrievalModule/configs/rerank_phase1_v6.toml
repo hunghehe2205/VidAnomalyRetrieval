@@ -1,0 +1,75 @@
+phase = "rerank-phase1-v6"
+seed = 42
+
+# v6 = v2 hyperparams (sweet spot, verified from git 3de805e^) + new stage-1 mining
+# (phase2 ck-900) + new captions (summary 43w avg vs old video_caption 104w with 984w outliers).
+# v3-v5 deviations dropped: label_smoothing=0 (v3+), caption_aug_word_drop_p=0 (v4+).
+# Hypothesis: v2 sweet spot + cleaner inputs → reranker actually learns video signal.
+
+[model]
+model_name_or_path = "/workspace/VidAnomalyRetrieval/RetrievalModule/models/Qwen3-VL-Reranker-2B"
+attn_implementation = "flash_attention_2"
+
+[data]
+train_file        = "data/T2V_VAR/ucf_crime_train_dedup_v2.json"
+q_to_all_pos_file = "data/T2V_VAR/q_to_all_pos.json"
+topk_train_file   = "outputs/Embedding/topk_train_phase2_ck900.json"
+descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/Summary/descriptions_train_v2.json"
+eval_topk_file    = "outputs/Embedding/topk_test_phase2_ck900.json"
+eval_descriptions_file = "/workspace/VidAnomalyRetrieval/DescriptionModule/Summary/descriptions_test_v2.json"
+video_root        = "/workspace/VidAnomalyRetrieval/UCF_Video"
+instruction       = "Retrieve a surveillance video whose visual content matches the anomaly event described in the query."
+
+[training]
+output_dir              = "outputs/Reranker/rerank-phase1-v6"
+# === Reused from v2 (verified from git commit 3de805e^) ===
+num_hard                = 5
+num_medium              = 2
+hard_rank_lo            = 2
+hard_rank_hi            = 15
+medium_rank_lo          = 16
+medium_rank_hi          = 50
+max_frames              = 32
+fps                     = 1.0
+max_length              = 10240
+num_epochs              = 2
+learning_rate           = 5.0e-5
+weight_decay            = 0.05
+warmup_ratio            = 0.1
+lr_scheduler            = "cosine"
+gradient_accumulation   = 4
+gradient_checkpointing  = true
+max_grad_norm           = 1.0
+logit_temperature       = 2.0
+hard_neg_refresh_steps  = 0
+hard_neg_refresh_topk   = 30
+micro_batch_size        = 2
+caption_dropout_p       = 0.5
+# === Explicitly NOT reusing v3+ additions (test if v2 sweet spot generalizes) ===
+label_smoothing         = 0.0          # v2 didn't have it
+caption_aug_word_drop_p = 0.0          # v4 added, no benefit
+# ===
+logging_steps           = 10
+progress_every_queries  = 5
+save_steps              = 50
+eval_steps              = 0
+eval_on_test_subset     = 0
+bf16                    = true
+
+[wandb]
+enable     = true
+project    = "Finetune-VAR-Qwen3VL-Reranker"
+run_name   = "rerank-phase1-v6-v2hp-newpool-newcap"
+log_every  = 10
+
+[hub]
+push_to_hub = false
+model_id    = "hungnghehe/qwen3-vl-reranker-2b-ucf-rerank-phase1-v6"
+private     = true
+
+[lora]
+r              = 32
+lora_alpha     = 32
+lora_dropout   = 0.1
+bias           = "none"
+target_modules = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
