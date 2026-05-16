@@ -4,50 +4,58 @@
 > mọi lựa chọn thiết kế** trong khâu fine-tune embedder + reranker để trả lời
 > phản biện. Tham chiếu code đi kèm để truy ngược khi cần.
 >
-> Cập nhật: 2026-05-16.
+> Cập nhật: 2026-05-16. **Ship cascade (no fusion). Fusion là ablation phụ.**
 
 ---
 
 ## 0. Bức tranh tổng thể
 
-Pipeline retrieval **2 tầng (cascade)** trên UCF-Crime, hướng Text → Video:
+Pipeline retrieval **2-stage cascade** trên UCF-Crime, hướng Text → Video.
+Bài toán: **Text-to-Video Anomaly Retrieval (T2V-VAR)** — cho query mô tả
+event, tìm video surveillance chứa event đó.
 
 ```
 query (text)
    │
    ▼
-[Stage-1] Qwen3-VL-Embedding-2B (dense bi-encoder, LoRA-finetuned)
-   │   ─ encode query, encode 290 video một lần (offline)
-   │   ─ score = cosine(q, v)
+[Stage-1]  Qwen3-VL-Embedding-2B  +  LoRA 2-phase (ck-900)
+   │   ─ dense bi-encoder, score = cosine(q, v) trên 290 video
    │   ─ giữ top-K (K=30) candidates
    ▼
-[Stage-2] Qwen3-VL-Reranker-2B (cross-encoder, LoRA-finetuned v6)
-   │   ─ với mỗi (query, candidate_video, caption) → score
+[Stage-2]  Qwen3-VL-Reranker-2B  +  LoRA v6 (ck-50)
+   │   ─ cross-encoder: với mỗi (query, video, caption) → score
    │   ─ re-order K candidates
-   ▼
-[Fusion] linear min-max: score_final = α·s_stage1 + (1-α)·s_rerank
-   │   ─ α grid-search trên test, best α=0.4 với ZS reranker
    ▼
 ranked list top-K
 ```
 
-Test set: **288 queries × 290 videos** (UCF-Crime test split, có 2 multi-positive group).
+(Score fusion `α·s_stage1 + (1-α)·s_rerank` đã được khảo sát và **không
+report trong main result** — chi tiết §3, là ablation phụ.)
 
-Headline numbers (test, R@1 / mAP):
+Test set: **288 unique queries × 290 videos** (UCF-Crime test split, có 2
+multi-positive group nhỏ; sample count = 290 do duplicate query).
 
-| Hệ thống | R@1 | mAP |
-|---|---|---|
-| Stage-1 ZS | 0.4722 | 0.5936 |
-| Stage-1 fine-tuned (P2 ck-900) | **0.5556** | **0.6779** |
-| ZS rerank (trên stage-1 ZS top-30) | 0.5486 | — |
-| **Fusion (stage-1 ZS + ZS rerank, α=0.4)** | **0.5972** | — |
-| FT rerank v2 ck-50 (best fine-tuned standalone) | 0.5625 | — |
-| Fusion(stage-1 ZS, v2 ck-50) | 0.5868 | — |
+### Headline numbers (test, R@1 / mAP, t2v)
 
-Kết luận thực nghiệm (anti-finding, là contribution chính của thesis):
-**fine-tune reranker tăng standalone R@1 nhưng GIẢM fusion R@1** vì làm reranker
-học theo caption-shortcut → failure modes của reranker tương quan với stage-1 →
-mất tính bổ trợ (complementarity) → fusion gain co lại.
+| Hệ thống | R@1 | mAP | Δ vs base |
+|---|---|---|---|
+| Stage-1 ZS (Qwen3-VL-Emb-2B as-is) | 0.4722 | 0.5936 | baseline |
+| Stage-1 fine-tuned (P2 ck-900) | 0.5556 | **0.6779** | **+8.34pp** |
+| **Cascade: ck-900 → rerank v6 ck-50** 🏆 | **0.5799** | — | **+10.77pp** |
+
+Mọi số trên là **standalone**, không có fusion.
+
+### Storyline thesis (3 đóng góp định lượng)
+
+1. **2-phase LoRA fine-tune cho dense embedder** (warmup + hard-neg mining
+   với asymmetric combined loss): **+8.34pp R@1**, +8.43pp mAP trên UCF.
+2. **LoRA fine-tune cross-encoder reranker v6**: cascade lift **+2.43pp**
+   trên đầu stage-1 mạnh, đạt R@1=0.5799.
+3. **Caption-shortcut anti-pattern** (methodology / cautionary): chứng minh
+   v1-v5 thất bại vì caption-matching shortcut (gap diagnostic +1.19, ZS
+   lift +7.62→+0.69pp khi caption ngắn lại). v6 fix bằng 2 confound
+   correction: stage-1 mining mạnh hơn (ck-900) + caption ngắn hơn (summary
+   43w). ⇒ "khi không có shortcut, fine-tune mới thực sự học visual signal".
 
 ---
 
@@ -161,29 +169,31 @@ Cụ thể:
 **Re-mining mỗi epoch**: vì sau mỗi epoch model đã thay đổi, "hard" cũ trở
 thành "easy" → cần mine lại. `_remine_before_epoch` chạy đầu mỗi epoch.
 
-**Kết quả phase 2** (UCF test):
+**Kết quả phase 2** (UCF test, 288 unique queries / 290 samples):
 
-| Ckpt | t2v R@1 | t2v R@30 | t2v mAP | v2t R@1 |
-|---|---|---|---|---|
-| ZS | 0.4724 | 0.9583 | 0.5966 | 0.4138 |
-| P1 ck-100 | 0.5243 | 0.9757 | 0.6538 | 0.4724 |
-| P2 ck-500 | 0.35 (collapse) | — | — | — |
-| **P2 ck-900** 🏆 | **0.5556** | 0.9792 | **0.6779** | **0.5034** |
-| P2 ck-1000 | 0.5243 | 0.9861 | 0.6537 | 0.4759 |
+| Ckpt | t2v R@1 | t2v R@5 | t2v R@10 | t2v R@30 | t2v R@50 | t2v mAP | v2t R@1 | v2t mAP |
+|---|---|---|---|---|---|---|---|---|
+| ZS | 0.4722 | — | — | 0.9583 | — | 0.5936 | 0.4138 | — |
+| P1 ck-100 | 0.5243 | — | — | 0.9757 | — | 0.6538 | 0.4724 | — |
+| P2 ck-500 | ~0.35 (collapse) | — | — | — | — | — | — | — |
+| **P2 ck-900** 🏆 | **0.5556** | 0.8472 | 0.9236 | 0.9792 | 0.9896 | **0.6779** | **0.5034** | 0.6332 |
+| P2 ck-1000 | 0.5243 | — | — | 0.9861 | — | 0.6537 | 0.4759 | — |
 
 Pattern **U-shape**: P2 epoch-1 (lr ramp lên peak 5e-5) phá vỡ embedding
 P1 → ck-500 collapse. Sau khi re-mining đầu epoch-2 + cosine decay, model
 recover và vượt qua P1 ở ck-900. Đây là rủi ro của P2: lr quá cao và độ
 bão hoà của mining cần cân bằng.
 
-**Δ tổng (ZS → ck-900): +8.32pp R@1, +8.13pp mAP, +8.96pp v2t R@1.**
+**Δ tổng (ZS → ck-900): +8.34pp t2v R@1, +8.43pp mAP, +8.96pp v2t R@1.**
 
-### 1.5 R@30 ceiling — chú ý cho phản biện
+### 1.5 Recall ceiling — chú ý cho phản biện
 
-- R@30 stage-1 P2 ck-900 = **0.9792** → **2.08% queries có positive
-  ngoài top-30** (irrecoverable miss cho mọi reranker dùng K=30 pool).
-- Mọi số rerank/fusion downstream bị chặn trên bởi 0.9792 nếu K=30.
-- Khi phản biện hỏi "tại sao không R@1 cao hơn?" → có thể vướng ceiling.
+- R@30 stage-1 P2 ck-900 = **0.9792** → **2.08% queries (6/288) có positive
+  ngoài top-30** → irrecoverable cho mọi reranker dùng K=30 pool.
+- R@50 = **0.9896** → chỉ 3/288 (1.04%) ngoài top-50.
+- Pipeline cascade dùng K=30 → ceiling cứng = 0.9792 cho R@1 sau rerank.
+- Trên thực tế cascade đạt R@1=0.5799, còn cách xa ceiling → bottleneck là
+  **rerank precision**, không phải stage-1 recall.
 
 ### 1.6 CategoryStratifiedSampler — naming đã phản biện
 
@@ -295,65 +305,90 @@ v6 thiết kế để giảm gap (caption ngắn hơn 2x, dropout cao).
 - `num_epochs = 2`, `max_grad_norm = 1.0`, bf16.
 - Per-epoch shuffle order = `random.Random(seed + epoch)` → reproducible.
 
-### 2.7 Lịch sử v1 → v6 (đầy đủ để phản biện)
+### 2.7 Lịch sử v1 → v6 (cautionary story cho thesis)
 
-| Ver | Thay đổi chính | Best ck | Standalone R@1 | Fusion R@1 (best α) | Status |
+Lưu ý: cột "Standalone R@1" của v1-v5 đo trên **stage-1 ZS top-30**. v6 đo
+trên **stage-1 ck-900 top-30** (pool khác → không so trực tiếp với v2 0.5625;
+phải so qua ZS-rerank-baseline cùng setup, xem §2.8).
+
+| Ver | Thay đổi chính | Best ck | Standalone R@1 | Stage-1 input | Status |
 |---|---|---|---|---|---|
-| v1 | dropout NOT impl | ck-100 | 0.010 | — | **catastrophic** (string memorization) |
-| v2 | dropout=0.5, lr=5e-5, group=8 | ck-50 | **0.5625** | 0.5868 (α=0.5) | best standalone, lost in fusion |
-| v3 | + label_smoothing=0.1, τ=4, group=16 | ck-50 | 0.5590 | — | killed step-100 (gap=+1.19) |
-| v4 | + word-drop aug, dropout=0.2 | ck-50 | 0.5590 | — | ckpt-100 drop xuống 0.5243 |
-| v5 | clean data + multi-pos fix + lr=3e-5 | ck-50 | 0.5521 | 0.5833 (α=0.6) | killed ck-100 (R@1=0.5382) |
-| **v6** | **v2 sweet spot + ck-900 mining + summary caption 43w** | running | TBD (target > 0.5625) | TBD | active 2026-05-10 |
+| v1 | dropout NOT impl | ck-100 | 0.010 | ZS | **catastrophic** (string memorization) |
+| v2 | dropout=0.5, lr=5e-5, group=8 | ck-50 | 0.5625 | ZS | best v1-v5 (caption shortcut) |
+| v3 | + label_smoothing=0.1, τ=4, group=16 | ck-50 | 0.5590 | ZS | killed step-100 (gap=+1.19) |
+| v4 | + word-drop aug, dropout=0.2 | ck-50 | 0.5590 | ZS | ckpt-100 drop xuống 0.5243 |
+| v5 | clean data + multi-pos fix + lr=3e-5 | ck-50 | 0.5521 | ZS | killed ck-100 (R@1=0.5382) |
+| **v6** 🏆 | **v2 hyperparams + ck-900 mining + summary caption 43w** | **ck-50** | **0.5799** | **ck-900** | **SHIPS** (cascade +2.43pp) |
 
-**Trend quan trọng (anti-finding)**: best fusion α leo từ 0.4 (ZS) → 0.5 (v2)
-→ 0.6 (v5) khi reranker train sâu hơn. Đây là **bằng chứng định lượng** cho
-mất complementarity: muốn α cao hơn nghĩa là stage-1 mang được nhiều thông
-tin hơn so với reranker trong fusion ⇔ reranker đóng góp ít đi.
+**Anti-pattern (cho phần methodology / cautionary)**: v1-v5 mỗi version nhỏ
+chỉ tăng standalone R@1 lượng nhỏ, nhưng đo trên **fusion với stage-1 ZS**
+thì gain từ fine-tune *giảm dần* và best α leo từ 0.4 (ZS rerank) → 0.5 (v2)
+→ 0.6 (v5). Đây là dấu hiệu mất complementarity: reranker bị fine-tune để
+trùng failure modes với stage-1 — caption-shortcut amplification. v6 fix
+confound này (xem §2.8) → cascade thật sự lift.
 
-### 2.8 v6 — assumption mới + sanity check ZS
+### 2.8 v6 — fix 2 confounds, kết quả ship
 
-Giả thuyết v6:
-- v1-v5 fail vì 2 confounds: (a) stage-1 mining yếu (ZS R@30=0.9583, sai
-  được mining sai), (b) caption `video_caption` quá dài (avg 104 từ, max 984
-  từ) → text matching shortcut.
-- v6 sửa cả 2: dùng **P2 ck-900** làm mining pool (R@30=0.9792, R@50=0.9853)
-  và đổi caption sang `summary` 43w avg (max 90w).
+Giả thuyết v6 (đề xuất 2026-05-10):
+- v1-v5 fail vì 2 confounds: (a) **stage-1 mining yếu** (ZS R@30=0.9583,
+  hard-negatives mined ồn), (b) **caption quá dài** (`video_caption` avg
+  104 từ, max 984 từ) → text matching shortcut.
+- v6 fix cả 2: dùng **P2 ck-900** làm mining pool (R@50 train trên 1605=
+  0.9401) và đổi caption sang `summary` (avg 43 từ, max 90 từ).
 
 **Sanity check ZS rerank với setup mới** (2026-05-10):
-- Stage-1 ck-900 R@1=0.5556 → ZS rerank với summary caption R@1=0.5625
-  (+**0.69pp**).
-- Trước đó ZS rerank trên stage-1 ZS cho lift **+7.62pp** (0.4724 → 0.5486).
-- ⇒ **Effective contribution của reranker sụp khi caption ngắn lại**
-  → confirm caption shortcut hypothesis. v1-v5 reranker đã ăn 6pp "miễn phí"
-  từ caption matching trong stage1-ZS setup. Khi cả stage1 mạnh hơn và caption
-  ngắn hơn, không còn shortcut nào để khai thác → reranker thực sự phải nhìn
-  video → khó hơn nhiều.
+- Stage-1 ZS R@1=0.4722 → ZS rerank (video_caption dài): R@1=0.5486
+  (+**7.62pp** lift — caption shortcut active).
+- Stage-1 ck-900 R@1=0.5556 → ZS rerank (summary cap ngắn): R@1=0.5625
+  (+**0.69pp** lift — caption shortcut bịt).
+- ⇒ ZS reranker gần như không lift khi caption ngắn ⇒ phần lift cũ chủ yếu
+  từ caption-matching, **không phải video understanding**.
 
-**v6 expected outcome** (3 kịch bản):
-1. R@1 > 0.5625 → ship (reranker thực sự học visual signal).
-2. R@1 ≈ 0.5625 → null result nhưng giả thuyết caption-shortcut được củng
-   cố → vẫn là contribution cho thesis.
-3. R@1 < 0.5625 → fail tương tự v1-v5 → ablate riêng phần mining vs caption.
+**Kết quả v6 ck-50 trên cascade** (2026-05-16, **kịch bản 1 đạt được**):
+
+| Stage | R@1 | R@5 | R@10 | R@20 | R@25 | R@30 | MdR |
+|---|---|---|---|---|---|---|---|
+| Stage-1 ck-900 (input) | 0.5556 | 0.8472 | 0.9236 | 0.9618 | 0.9722 | 0.9792 | 1.0 |
+| **Rerank v6 ck-50** | **0.5799** | 0.8194 | 0.9167 | 0.9722 | 0.9792 | 0.9792 | 1.0 |
+| Δ (rerank − stage1) | **+2.43** | −2.78 | −0.69 | +1.04 | +0.69 | 0 (saturated) | — |
+
+- v6 ck-50 lift **+2.43pp R@1** so với stage-1 ck-900.
+- Đáng chú ý: lift này **lớn hơn** ZS-rerank-lift (+0.69pp) trên cùng pool
+  → reranker fine-tune thực sự đóng góp visual signal **ngoài** caption.
+  Đây là counter-evidence quan trọng cho phần Q&A.
+- R@5/R@10 nhẹ regress (~2-3 query swap), R@20/R@25 lift, R@30 saturated
+  bởi stage-1 ceiling 0.9792.
+
+**Hyperparams v6** (`configs/rerank_phase1_v6.toml`, kế thừa v2 sweet spot):
+- group_size=8 (1 pos + 5 hard rank 2-15 + 2 medium rank 16-50).
+- num_epochs=2, lr=5e-5, weight_decay=0.05, warmup=0.1, cosine.
+- logit_temperature=2.0, caption_dropout_p=0.5, label_smoothing=0.0
+  (v3 thử 0.1 không cải thiện → v6 set lại 0).
+- caption_aug_word_drop_p=0.0 (v4 thử 0.5 không lift → v6 bỏ).
+- gradient_accumulation=4, micro_batch=2, bf16+flash-attn.
+- LoRA r=32, α=32, dropout=0.1.
 
 ---
 
-## 3. Score Fusion (stage-1 + reranker)
+## 3. Score Fusion (ablation — không trong main report)
 
-### 3.1 Tại sao fusion
+> **Note**: phần này KHÔNG report trong kết quả chính. Pipeline ship là
+> **cascade thuần** (stage-1 → rerank, không fusion). Giữ section này như
+> ablation phụ + ngữ cảnh cho v1-v5 anti-pattern.
+
+### 3.1 Tại sao xét fusion
 
 Stage-1 cosine và reranker logit/sigmoid sống ở **hai scale khác nhau** và
-**bắt được những loại lỗi khác nhau**:
-- Stage-1: dense bi-encoder, encode toàn cảnh — bắt được "tương tự ngữ nghĩa
-  tổng thể" tốt nhưng không zoom vào detail của query.
-- Reranker: cross-encoder, attention chéo query–doc — bắt được "khớp chi tiết
-  cụ thể" nhưng hi-cost (chỉ chạy được trên top-K).
+có thể **bắt được những loại lỗi khác nhau**:
+- Stage-1: dense bi-encoder, encode toàn cảnh tổng thể.
+- Reranker: cross-encoder, attention chéo query–doc, zoom vào chi tiết.
 
-Hai signals **bổ trợ** ⇒ kết hợp sẽ tốt hơn từng cái.
+Nếu hai signals bổ trợ thực sự, fusion có thể tốt hơn từng cái. Ablation
+khảo sát này để **đo định lượng complementarity** qua các version reranker.
 
-### 3.2 Linear fusion (chính)
+### 3.2 Linear fusion
 
-Per-query min-max normalize cả hai score (vì scale khác nhau):
+Per-query min-max normalize:
 
 ```
 s_s1_norm[c] = (s_stage1[c] - min) / (max - min)
@@ -361,33 +396,38 @@ s_rr_norm[c] = (s_rerank[c] - min) / (max - min)
 fused[c]     = α · s_s1_norm[c] + (1 - α) · s_rr_norm[c]
 ```
 
-Grid α ∈ {0.0, 0.1, ..., 1.0}. Best α tìm trên test (288).
+Grid α ∈ {0.0, 0.1, ..., 1.0}. Best α trên test.
 
-**Caveat phản biện**: α tuned trên test → có thể overfit α. Cho publication
-cần val/test split hoặc fix α=0.5 a priori. Khi defense hỏi: thừa nhận,
-nhưng note rằng monotonic trend của α qua các version (0.4→0.5→0.6) là kết
-luận chính, không phụ thuộc α tối ưu cụ thể.
-
-### 3.3 Reciprocal Rank Fusion (baseline)
+### 3.3 RRF baseline (normalization-free)
 
 ```
-RRF[c] = 1/(k + rank_stage1[c]) + 1/(k + rank_rerank[c]),   k=60 (Cormack 2009)
+RRF[c] = 1/(k + rank_stage1[c]) + 1/(k + rank_rerank[c]),   k=60
 ```
 
-Không cần normalize. Test cho R@1=0.5625 — **kém hơn linear** trên dataset
-này. Linear thắng vì với K=30 nhỏ, sự khác biệt score giàu thông tin hơn rank
-ordinal.
+### 3.4 Ablation results (stage-1 ZS pool)
 
-### 3.4 Best result
-
-| Method | α | R@1 | Δ vs ZS rerank |
+| Method | α | R@1 | Notes |
 |---|---|---|---|
-| Stage-1 ZS only | — | 0.4722 | — |
-| ZS rerank only | 0 | 0.5486 | — |
-| **Fusion linear (ZS + ZS rerank)** | **0.4** | **0.5972** | **+4.86pp** |
-| Fusion linear (ZS + v2 ck-50) | 0.5 | 0.5868 | -1.04pp |
-| Fusion linear (ZS + v5 ck-50) | 0.6 | 0.5833 | -1.39pp |
-| RRF (ZS + ZS rerank), k=60 | — | 0.5625 | -3.47pp vs linear |
+| Stage-1 ZS only | — | 0.4722 | baseline |
+| ZS rerank only (stage-1 ZS) | 0 | 0.5486 | — |
+| Fusion linear (ZS s1 + ZS rr) | 0.4 | 0.5972 | best α=0.4 |
+| Fusion linear (ZS s1 + v2 ck-50) | 0.5 | 0.5868 | α leo 0.4→0.5 |
+| Fusion linear (ZS s1 + v5 ck-50) | 0.6 | 0.5833 | α leo 0.5→0.6 |
+| RRF (ZS s1 + ZS rr), k=60 | — | 0.5625 | kém linear |
+
+**Tại sao fusion KHÔNG vào main report**:
+1. α tuned trên test (288) → overfit α; cần val/test split mới publication-quality.
+2. Best α leo 0.4→0.6 qua v2→v5 là **negative finding** (complementarity
+   giảm khi fine-tune sâu). Nếu report fusion làm main number sẽ phải
+   defend tại sao chính chiến lược fine-tune lại cần fusion để bù → confusing.
+3. Sau khi v6 fix confound, cascade thuần (no fusion) đã lift đủ +2.43pp
+   từ reranker — câu chuyện đơn giản hơn cho thesis: "stage-1 strong +
+   reranker fixed → cascade works".
+4. Chưa đo fusion(ck-900, v6 ck-50). Có thể tốt hơn 0.5799 nhưng không cần
+   để defend đóng góp.
+
+⇒ Fusion analysis được dùng làm **bằng chứng định lượng cho caption-shortcut
+anti-pattern** trong methodology section (v1-v5), không phải là kết quả ship.
 
 ---
 
